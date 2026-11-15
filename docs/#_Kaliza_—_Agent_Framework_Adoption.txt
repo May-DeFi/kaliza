@@ -1,0 +1,526 @@
+# Kaliza — Agent Framework Adoption and Backend Orchestration Upgrade
+
+**Document type:** Backend architecture and implementation specification  
+**Target repository:** `May-DeFi/kaliza`  
+**Target branch:** `main`  
+**Implementation language:** TypeScript  
+**Status:** Proposed architecture decision and implementation requirements
+
+---
+
+## 1. Objective
+
+Upgrade Kaliza's existing backend from its current stub-based orchestration architecture to a production-capable, durable, multi-agent execution system.
+
+The current implementation contains domain services, task records, adapters and an orchestration interface, but its active orchestrator is a stub. It can simulate completion without performing genuine agent reasoning, tool use or task execution.
+
+This is a fundamental architectural weakness. The objective is to correct it before expanding the platform's business capabilities.
+
+Bolt must work from the existing repository and preserve useful existing functionality. This is an architectural upgrade, not permission to discard the backend and generate an unrelated replacement.
+
+## 2. Architecture decision
+
+Adopt the following architecture:
+
+| Component | Selected technology | Responsibility |
+|---|---|---|
+| Agent orchestration | LangGraph.js | Agent lifecycle, state, planning, delegation, tool selection and execution flow |
+| Durable workflow execution | Temporal TypeScript SDK | Long-running workflows, retries, recovery, scheduling, waiting and resumption |
+| Isolated execution | Daytona | Linux environments, files, scripts, browser automation and other execution workloads |
+| Application database | Supabase / PostgreSQL | Users, workspaces, tasks, approvals, integrations, billing and audit records |
+| User control channel | WhatsApp | Primary interface for instructions, questions, progress and results |
+| Application API | Existing TypeScript backend | Authentication, routing, application services and authorization |
+| Policy and tool boundary | Kaliza-owned services | Permissions, tool authorization, approvals and audit enforcement |
+
+**The distinction between LangGraph and Temporal is mandatory.**
+
+- LangGraph controls agent reasoning and coordination.
+- Temporal controls the durable lifecycle of work.
+- Daytona provides isolated execution infrastructure.
+- Kaliza Core remains the authority for identity, permissions, approvals, billing and application data.
+
+Do not replace these responsibilities with a single framework.
+
+### Integration requirement
+
+Both LangGraph and Temporal must run through their TypeScript implementations.
+
+Do not assume an official first-party LangGraph.js–Temporal integration is available. Implement an explicit adapter: Temporal Workflows coordinate execution, and Temporal Activities invoke and resume LangGraph.js runs.
+
+All integration behavior must be tested, including worker restarts, activity retries, interrupted agent runs and approval resumption.
+
+## 3. Required agent architecture
+
+Implement a supervisor-led, multi-agent architecture.
+
+The system must support these specialist capabilities:
+
+1. **Supervisor / Coordinator**
+   - Receives the task context.
+   - Understands the user's objective.
+   - Creates or approves the execution plan.
+   - Delegates work to appropriate specialists.
+   - Tracks progress and resolves coordination problems.
+   - Determines when the task is complete.
+
+2. **Planning**
+   - Breaks complex requests into actionable steps.
+   - Identifies dependencies, required tools and expected outputs.
+   - Determines which actions need approval.
+   - Creates a structured execution plan.
+
+3. **Research**
+   - Researches information using authorized tools.
+   - Collects and evaluates evidence.
+   - Produces structured findings for other agents.
+   - Distinguishes verified information from assumptions.
+
+4. **Strategy**
+   - Evaluates research and task context.
+   - Develops recommendations and execution strategies.
+   - Identifies risks, opportunities and alternatives.
+
+5. **Execution**
+   - Carries out approved actions through Kaliza's tool gateway.
+   - Uses Daytona when isolated computing or file execution is needed.
+   - Reports tool results and execution failures.
+
+6. **Content and Communication**
+   - Produces documents, proposals, messages, reports and other deliverables.
+   - Uses task-specific instructions and brand or business context.
+   - Does not independently publish or send consequential external communications without authorization.
+
+7. **Review**
+   - Checks results against the original objective.
+   - Validates deliverables and execution outcomes.
+   - Identifies missing information, errors and incomplete steps.
+   - Requests corrections or additional execution when necessary.
+
+These are capabilities and agent roles, not necessarily seven permanently running services. The supervisor should dynamically delegate work based on task requirements.
+
+Do not create unnecessary independent agents for simple tasks. The system should use the smallest suitable agent configuration and support parallel specialist work when useful.
+
+## 4. Agent runtime requirements
+
+Implement a real LangGraph.js runtime.
+
+It must support:
+
+- Typed, structured agent state.
+- Multiple model providers through the existing model gateway.
+- Supervisor and specialist agent coordination.
+- Conditional routing and delegation.
+- Tool registration and controlled invocation.
+- Parallel work where appropriate.
+- Conversation and task context.
+- Checkpoint persistence.
+- Streaming or incremental progress reporting.
+- Human approval interruptions.
+- Resumption from saved state.
+- Error handling and controlled retries.
+- Structured final results and deliverables.
+
+Use LangGraph's supported TypeScript APIs. Avoid deprecated APIs.
+
+The agent runtime must be provider-independent. Do not hardcode one model provider into every agent.
+
+All model calls must go through Kaliza's model gateway or a clearly defined provider abstraction.
+
+## 5. Durable execution with Temporal
+
+Introduce Temporal as the durable workflow execution layer.
+
+The system must support tasks that take seconds, minutes, hours or longer.
+
+Required capabilities:
+
+- Durable task execution across process and worker restarts.
+- Retry policies with controlled limits and backoff.
+- Timeouts and cancellation.
+- Workflow status tracking.
+- Waiting for external events.
+- Waiting for human approval.
+- Resuming work after approval.
+- Recovery from failed activities.
+- Idempotent handling of retried operations.
+- Workflow versioning and safe deployment upgrades.
+- Child workflows for independently managed subtasks where appropriate.
+
+### Execution model
+
+A typical task should follow this lifecycle:
+
+1. A user submits an instruction through WhatsApp or the API.
+2. Kaliza authenticates the user and resolves workspace and service context.
+3. Kaliza creates or updates the authoritative task record in Supabase.
+4. A Temporal Workflow is started using a stable task/workflow identifier.
+5. Temporal invokes the agent runtime through Activities.
+6. LangGraph plans and coordinates the required agents.
+7. Agents request tools through Kaliza's tool gateway.
+8. Daytona executes isolated workloads when required.
+9. Results and progress are recorded.
+10. If approval is needed, the task pauses and waits for a decision.
+11. After approval, execution resumes from saved state.
+12. The review agent validates the outcome.
+13. Kaliza records the final result and communicates it through WhatsApp.
+
+Temporal Workflow code must remain deterministic. Model calls, external API calls, database side effects and Daytona operations must be performed through Activities or other appropriate external execution boundaries.
+
+### Existing queue and workers
+
+Inspect the existing queue, job worker and recovery worker before implementation.
+
+Do not leave two competing systems independently dispatching the same tasks.
+
+Migrate existing job responsibilities into Temporal where appropriate, or retain a clearly defined complementary role for existing workers. Document the final ownership of dispatch, retries, recovery and scheduling.
+
+## 6. Kaliza's security and tool execution boundaries
+
+The frameworks must never bypass Kaliza's security architecture.
+
+All agents must use the existing Kaliza tool gateway or its upgraded equivalent.
+
+The tool gateway must enforce:
+
+- Authenticated user identity.
+- Workspace membership and ownership.
+- Agent and task permissions.
+- Tool-level authorization.
+- Workspace-specific resource access.
+- Approval requirements.
+- Execution limits.
+- Audit logging.
+- Usage and billing accounting.
+
+An agent must not receive unrestricted access to Supabase service-role credentials, Meta credentials, Google credentials or other application secrets.
+
+### Daytona requirements
+
+Daytona remains a required component of the architecture.
+
+Use it for workloads that require isolated execution, including:
+
+- File creation and modification.
+- Script and command execution.
+- Document generation.
+- Data processing.
+- Browser-based tasks where supported.
+- Media and other supported processing.
+- Code execution and testing.
+
+Each execution environment must have scoped access to the task and workspace resources it needs.
+
+Use temporary, least-privilege credentials where possible. Do not expose application-wide secrets inside an agent sandbox.
+
+The agent framework must not replace Daytona with unrestricted local shell execution.
+
+## 7. Human approval and sensitive actions
+
+Kaliza must support autonomous execution for ordinary, low-risk work while retaining human control over sensitive or consequential actions.
+
+Actions requiring approval should include, as applicable:
+
+- Sending external messages or proposals.
+- Publishing content on behalf of a business.
+- Spending advertising budget.
+- Financial transactions or commitments.
+- Destructive operations.
+- Changes to important business or account settings.
+- Other actions classified as sensitive by Kaliza's policy engine.
+
+The policy engine, not the language model, determines whether an action requires approval.
+
+### Approval lifecycle
+
+1. Agent requests a restricted action.
+2. Tool gateway checks the applicable policy.
+3. Kaliza creates an approval record.
+4. The action is not executed.
+5. The user receives an approval request through the appropriate channel.
+6. The user approves, rejects or modifies the proposed action.
+7. Kaliza validates the decision and authorization.
+8. Temporal receives the decision and resumes or terminates the workflow.
+9. LangGraph resumes using its saved task state.
+10. The action is executed only after authorization is confirmed.
+
+Approval records must be bound to the user, workspace, task, action and exact approved payload.
+
+Use canonical serialization and cryptographic integrity checks for approval payloads. A modified payload must require a new approval.
+
+Approval decisions must be auditable and protected against replay or unauthorized reuse.
+
+## 8. Persistence and state management
+
+Supabase remains Kaliza's authoritative application database.
+
+Inspect the existing schema and migrations before adding tables.
+
+Persist enough information to recover and understand an execution:
+
+- Task and workflow identifiers.
+- Workspace and user identifiers.
+- Current task status.
+- Agent execution status.
+- Execution plan and relevant outputs.
+- LangGraph thread/checkpoint reference.
+- Temporal workflow reference.
+- Tool invocation records.
+- Approval references.
+- Errors and retry information.
+- Final deliverables and result references.
+- Usage and billing events.
+- Audit events.
+
+Do not store secrets in agent state or checkpoints.
+
+Do not assume that LangGraph checkpoint storage automatically replaces Kaliza's application task records. Define how the two persistence layers relate.
+
+Use tenant-aware checkpoint storage and enforce workspace access when loading or resuming a graph.
+
+Avoid storing large binary files directly in task state. Store file references and metadata instead.
+
+## 9. WhatsApp integration
+
+WhatsApp remains the primary controller of Kaliza.
+
+A user must be able to:
+
+- Submit new tasks.
+- Ask follow-up questions.
+- Provide additional context.
+- Receive clarification requests.
+- Receive execution progress.
+- Approve or reject restricted actions.
+- Receive final results and deliverables.
+- Resume conversations around existing tasks.
+
+Inbound WhatsApp messages must reach the real task and agent execution pipeline.
+
+Do not stop after creating a conversation or task record.
+
+Outbound WhatsApp communication must use the appropriate Meta adapter and must report actual delivery or provider status. A simulated response must never be presented as a successfully delivered message.
+
+Keep Kaliza's own WhatsApp control interface distinct from a customer's WhatsApp Business integration.
+
+## 10. API and service integration
+
+Inspect and upgrade the existing services rather than creating duplicate implementations.
+
+At minimum, review:
+
+- Agent orchestration and agent-run services.
+- Task service and task state machine.
+- Tool gateway.
+- Policy engine.
+- Approval service.
+- Daytona adapter and sandbox manager.
+- WhatsApp webhook and handler.
+- Model gateway.
+- Queue and workers.
+- Notification service.
+- Integration service.
+- Business Growth service.
+- Usage and billing services.
+
+Introduce a clean runtime interface so application services do not depend directly on LangGraph implementation details.
+
+The current `StubOrchestrator` must no longer be the production runtime.
+
+A development-only mock may remain for isolated unit tests, but production configuration must fail clearly if the real runtime is unavailable. It must never silently report simulated work as completed work.
+
+## 11. Observability and operational controls
+
+Every task must be traceable across:
+
+- WhatsApp request.
+- API request.
+- Task record.
+- Temporal workflow.
+- LangGraph thread and execution.
+- Agent delegation.
+- Tool calls.
+- Daytona execution.
+- Approval events.
+- Final result.
+
+Record execution duration, model usage, token consumption, provider errors, tool failures and retry counts.
+
+Provide structured logs and correlation identifiers.
+
+Do not expose private chain-of-thought or hidden model reasoning in logs or user-facing progress. Record operational events, plans, tool inputs and outputs where appropriate, decisions, errors and concise execution summaries.
+
+Usage accounting must be connected to actual model and tool consumption rather than estimated task completion.
+
+## 12. Migration and implementation sequence
+
+Implement in controlled phases.
+
+**Phase 1 — Repository and architecture audit**
+
+- Inspect all existing orchestration, task, worker, queue and database code.
+- Identify reusable services and interfaces.
+- Identify duplicate or conflicting responsibilities.
+- Document current behavior and migration risks.
+- Confirm Node.js and TypeScript compatibility with the selected SDKs.
+- Produce a dependency and integration plan.
+
+**Phase 2 — Framework foundation**
+
+- Install and configure LangGraph.js.
+- Install and configure the Temporal TypeScript SDK.
+- Establish Temporal development and deployment configuration.
+- Implement the runtime abstraction and Temporal client/worker structure.
+- Implement LangGraph checkpoint persistence.
+- Implement the Temporal-to-LangGraph Activity adapter.
+- Verify that both systems can communicate and persist state.
+
+**Phase 3 — Real agent runtime**
+
+- Implement the supervisor.
+- Implement planning and specialist agent capabilities.
+- Connect the model gateway.
+- Register tools through Kaliza's tool gateway.
+- Implement delegation, structured state and task outputs.
+- Remove the stub from the production execution path.
+
+**Phase 4 — Durable execution**
+
+- Connect application tasks to Temporal Workflows.
+- Implement retries, timeouts, cancellation and recovery.
+- Implement stable identifiers and idempotency.
+- Implement approval waiting and workflow resumption.
+- Ensure completed work is not repeated after recovery.
+
+**Phase 5 — Daytona and integrations**
+
+- Connect agent execution to Daytona.
+- Enforce scoped credentials and workspace permissions.
+- Connect supported Meta and Google operations through existing adapters.
+- Verify actual provider behavior when credentials are available.
+- Ensure missing credentials produce a clear not-configured status.
+
+**Phase 6 — WhatsApp and Business Growth**
+
+- Connect inbound WhatsApp instructions to the real agent runtime.
+- Implement progress updates and clarification requests.
+- Connect approvals to the durable workflow.
+- Connect final deliverables to WhatsApp.
+- Upgrade Business Growth workflows to use the real runtime.
+
+**Phase 7 — Testing, hardening and documentation**
+
+- Run build, typecheck, lint and automated tests.
+- Add integration and failure-recovery tests.
+- Validate tenant isolation and authorization.
+- Validate approval integrity.
+- Verify task recovery and idempotency.
+- Update architecture and developer documentation.
+- Produce an implementation and test report.
+
+## 13. Mandatory acceptance criteria
+
+The upgrade is not complete merely because the packages are installed or the application compiles.
+
+Bolt must demonstrate all of the following:
+
+1. A real user task reaches LangGraph and executes an actual agent workflow.
+2. The supervisor can delegate work to at least two specialist capabilities.
+3. Agents can call authorized tools through Kaliza's tool gateway.
+4. A task can use Daytona for an actual isolated execution.
+5. Agent state is persisted and can be resumed.
+6. A Temporal Workflow survives a worker restart.
+7. A failed Activity follows the configured retry policy without duplicating completed external side effects.
+8. A task can pause for human approval and resume after approval.
+9. A rejected approval prevents the restricted action.
+10. An altered approval payload is rejected.
+11. A user cannot access another workspace's task or execution state.
+12. WhatsApp inbound processing starts the real execution pipeline.
+13. The system reports real execution outcomes rather than stubbed success.
+14. Model and tool usage is recorded for billing and audit purposes.
+15. Existing useful backend functionality remains operational.
+16. Production configuration cannot silently fall back to a simulated orchestrator.
+
+For integrations requiring unavailable external credentials, implement the integration and tests using controlled mocks, clearly label the live integration as unverified, and do not claim a live pass.
+
+## 14. Required test scenarios
+
+At minimum, create automated tests for:
+
+- Simple task completion.
+- Multi-agent delegation.
+- Tool authorization failure.
+- Unauthorized workspace access.
+- Daytona execution success and failure.
+- Model provider timeout.
+- Activity retry and idempotency.
+- Temporal worker restart and recovery.
+- LangGraph checkpoint persistence and resume.
+- Approval pending, approval granted and approval rejected.
+- Approval payload tampering.
+- Duplicate WhatsApp webhook delivery.
+- Task cancellation.
+- Usage accounting.
+- Final result delivery failure.
+
+Include a practical end-to-end test that submits a task, performs research, executes a permitted action in Daytona, pauses for approval where required, resumes and returns a verified result.
+
+## 15. Documentation updates
+
+Update the existing documentation instead of leaving conflicting architecture instructions.
+
+At minimum, revise:
+
+- `docs/MASTER_SYSTEM_ARCHITECTURE.md`
+- `docs/BACKEND_DEVELOPER_SPEC.md`
+- `README.md`
+- `.bolt/memory.md`
+- `.bolt/config.json` if relevant to Bolt's project instructions
+- `.env.example`
+- Database migration documentation
+- Deployment and worker setup instructions
+
+The documentation must explain the responsibilities of LangGraph, Temporal, Daytona and Kaliza Core, including their integration boundaries.
+
+Document all new environment variables without adding real credentials.
+
+Ensure Bolt's persistent project instructions identify the project as **Kaliza** and describe the selected architecture accurately.
+
+## 16. Implementation constraints
+
+- Preserve the existing TypeScript backend and useful domain logic.
+- Do not replace Supabase with another application database.
+- Do not remove Daytona.
+- Do not move primary user control away from WhatsApp.
+- Do not expose service-role keys or provider secrets to agents.
+- Do not allow agents to bypass the tool gateway or policy engine.
+- Do not treat model-generated approval as human approval.
+- Do not use in-memory state as the only persistence mechanism.
+- Do not report mocked or simulated execution as real execution.
+- Do not add unrelated product features during this architectural upgrade.
+- Do not leave duplicate task dispatch or competing workflow ownership.
+- Keep the system modular so additional specialist agents and services can be added later.
+
+## 17. Bolt's completion report
+
+At completion, provide a report containing:
+
+1. Architecture implemented.
+2. Framework and SDK versions installed.
+3. Files and services changed.
+4. Database migrations added or modified.
+5. Existing components retained, replaced or deprecated.
+6. Tests executed and their actual results.
+7. Build, typecheck and lint results.
+8. Verified live integrations.
+9. Simulated integrations and why they remain simulated.
+10. Remaining blockers and required credentials.
+11. Deployment requirements.
+12. Known limitations.
+
+Separate **implemented**, **automatically tested**, **manually verified**, **simulated** and **not verified** results.
+
+Do not declare the upgrade complete while any mandatory acceptance criterion is untested or failing.
+
+---
+
+**Final instruction to Bolt:** Treat this document as the controlling implementation specification for the Kaliza agent-runtime upgrade. First inspect the existing backend, then implement the architecture in phases, preserving working functionality. Do not simply add framework dependencies around the existing stub. The objective is a genuinely operational, recoverable, secure multi-agent execution platform integrated with Kaliza's existing WhatsApp, Supabase, Daytona and business-service architecture.
