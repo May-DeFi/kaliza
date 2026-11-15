@@ -10,7 +10,7 @@ import type {
   RunSnapshot,
   RunEvent,
 } from '../../domain/agents/orchestrator.js';
-import { AgentRunStatus } from '../../config/constants.js';
+import { AgentRunStatus, type AgentRunStatusValue } from '../../config/constants.js';
 import { logger } from '../../config/logger.js';
 import { env } from '../../config/env.js';
 

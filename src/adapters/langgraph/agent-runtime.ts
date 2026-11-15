@@ -1,21 +1,11 @@
-import { StateGraph, Annotation, START, END, MemorySaver } from '@langchain/langgraph';
-import type { CompiledStateGraph } from '@langchain/langgraph';
+import { StateGraph, Annotation, START, END } from '@langchain/langgraph';
 import { callModel } from '../../domain/models/model-gateway.js';
-import { authorizeToolExecution, recordToolInvocation, getToolDefinition } from '../../domain/tools/tool-gateway.js';
-import { evaluatePolicy, computeActionHash } from '../../domain/policies/policy-engine.js';
-import { createApproval, getApproval, isApprovalValid } from '../../domain/approvals/approval-service.js';
 import { transitionTask } from '../../domain/tasks/task-service.js';
-import { executeInSandbox, provisionSandbox, getSandbox } from '../../domain/tasks/sandbox-manager.js';
-import { recordUsage } from '../../domain/usage/usage-service.js';
-import { recordAuditEvent } from '../../domain/audit/audit-service.js';
-import { notifyTaskEvent } from '../../domain/notifications/notification-service.ts';
-import { TaskStatus, AgentRunStatus } from '../../config/constants.js';
+import { executeInSandbox, provisionSandbox } from '../../domain/tasks/sandbox-manager.js';
+import { notifyTaskEvent } from '../../domain/notifications/notification-service.js';
+import { AgentRunStatus } from '../../config/constants.js';
 import { logger } from '../../config/logger.js';
-import { SupabaseCheckpointSaver } from '../../adapters/langgraph/supabase-checkpoint.js';
-import type { CheckpointSaver } from '@langchain/langgraph';
-import type { RunnableConfig } from '@langchain/langgraph';
-
-// ===== Agent State Definition =====
+import { SupabaseCheckpointSaver } from './supabase-checkpoint.js';
 
 const AgentState = Annotation.Root({
   workspace_id: Annotation<string>,
@@ -34,7 +24,6 @@ const AgentState = Annotation.Root({
   execution_results: Annotation<string[]>({ reducer: (a, b) => [...a, ...b], default: () => [] }),
   content_deliverables: Annotation<string[]>({ reducer: (a, b) => [...a, ...b], default: () => [] }),
   review_result: Annotation<string>({ reducer: (_, b) => b, default: () => '' }),
-  delegated_agents: Annotation<string[]>({ reducer: (a, b) => [...a, ...b], default: () => [] }),
   pending_approval_id: Annotation<string | null>({ reducer: (_, b) => b, default: () => null }),
   approval_decision: Annotation<string | null>({ reducer: (_, b) => b, default: () => null }),
   error: Annotation<string | null>({ reducer: (_, b) => b, default: () => null }),
@@ -47,8 +36,6 @@ const AgentState = Annotation.Root({
 });
 
 export type KalizaAgentState = typeof AgentState.State;
-
-// ===== Agent Implementations =====
 
 async function callAgentModel(
   state: KalizaAgentState,
@@ -66,12 +53,10 @@ async function callAgentModel(
     max_tokens: 2000,
     temperature: 0.4,
   });
-
   return response.content;
 }
 
 // ===== Supervisor =====
-
 async function supervisorNode(state: KalizaAgentState): Promise<Partial<KalizaAgentState>> {
   logger.info('Supervisor evaluating task', { taskId: state.task_id, phase: state.current_phase });
 
@@ -80,265 +65,128 @@ async function supervisorNode(state: KalizaAgentState): Promise<Partial<KalizaAg
       state,
       `You are the Kaliza Supervisor. You coordinate a multi-agent team to accomplish business tasks.
 Analyze the user's objective and determine which specialist agents are needed.
-
-Available specialists:
-- planning: Breaks complex requests into actionable steps
-- research: Gathers information using authorized tools
-- strategy: Evaluates options and develops recommendations
-- execution: Carries out approved actions through the tool gateway
-- content: Produces documents, messages, and deliverables
-- review: Validates results against the objective
-
-Respond with a JSON plan: {"delegated_agents": ["planning", ...], "reasoning": "..."}`,
+Available specialists: planning, research, strategy, execution, content, review.
+Respond with a structured plan.`,
       `Objective: ${state.objective}\nContext: ${state.conversation_context}`,
       'reasoning',
     );
-
-    return {
-      current_phase: 'planning',
-      plan,
-      delegated_agents: ['planning'],
-      messages: [`[supervisor] Delegating to planning agent`],
-    };
+    return { current_phase: 'planning', plan, messages: ['[supervisor] Delegating to planning agent'] };
   }
 
-  // After specialists have run, supervisor decides next step
   if (state.current_phase === 'review') {
     if (state.review_result.includes('PASS') || state.review_result.includes('COMPLETE')) {
-      return {
-        status: AgentRunStatus.COMPLETED,
-        final_result: state.review_result,
-        current_phase: 'end',
-        messages: [`[supervisor] Task completed successfully`],
-      };
+      return { status: AgentRunStatus.COMPLETED, final_result: state.review_result, current_phase: 'end', messages: ['[supervisor] Task completed'] };
     }
-    return {
-      status: AgentRunStatus.FAILED,
-      final_result: state.review_result,
-      current_phase: 'end',
-      messages: [`[supervisor] Task did not pass review`],
-    };
+    return { status: AgentRunStatus.FAILED, final_result: state.review_result, current_phase: 'end', messages: ['[supervisor] Task failed review'] };
   }
-
   return { current_phase: 'end' };
 }
 
-// ===== Planning Agent =====
-
+// ===== Planning =====
 async function planningNode(state: KalizaAgentState): Promise<Partial<KalizaAgentState>> {
   logger.info('Planning agent working', { taskId: state.task_id });
-
   const planText = await callAgentModel(
     state,
-    `You are the Kaliza Planning agent. Break down the objective into concrete, actionable steps.
-For each step, identify:
-- What needs to be done
-- Which agent should handle it
-- What tools are needed
-- Whether approval is required (for high-risk actions like publishing, spending, or sending external messages)
-
-Respond with a structured plan.`,
+    `You are the Kaliza Planning agent. Break down the objective into concrete, actionable steps. Identify which actions need approval.`,
     `Objective: ${state.objective}\nAvailable tools: ${state.tool_allowlist.join(', ')}`,
     'classification',
   );
-
-  return {
-    current_phase: 'research',
-    plan: planText,
-    messages: [`[planning] Created execution plan`],
-  };
+  return { current_phase: 'research', plan: planText, messages: ['[planning] Created execution plan'] };
 }
 
-// ===== Research Agent =====
-
+// ===== Research =====
 async function researchNode(state: KalizaAgentState): Promise<Partial<KalizaAgentState>> {
   logger.info('Research agent working', { taskId: state.task_id });
-
   const findings = await callAgentModel(
     state,
-    `You are the Kaliza Research agent. Gather and evaluate information relevant to the objective.
-Use the plan to guide your research. Distinguish verified information from assumptions.
-Produce structured findings that other agents can use.`,
+    `You are the Kaliza Research agent. Gather and evaluate information. Distinguish verified from assumed.`,
     `Objective: ${state.objective}\nPlan: ${state.plan}`,
     'research',
   );
-
-  return {
-    current_phase: 'strategy',
-    research_findings: findings,
-    messages: [`[research] Gathered findings`],
-  };
+  return { current_phase: 'strategy', research_findings: findings, messages: ['[research] Gathered findings'] };
 }
 
-// ===== Strategy Agent =====
-
+// ===== Strategy =====
 async function strategyNode(state: KalizaAgentState): Promise<Partial<KalizaAgentState>> {
   logger.info('Strategy agent working', { taskId: state.task_id });
-
   const strategyText = await callAgentModel(
     state,
-    `You are the Kaliza Strategy agent. Evaluate the research findings and develop an execution strategy.
-Identify risks, opportunities, and alternatives. Determine which actions require human approval.`,
+    `You are the Kaliza Strategy agent. Evaluate research and develop an execution strategy. Identify risks and approval requirements.`,
     `Objective: ${state.objective}\nResearch: ${state.research_findings}\nPlan: ${state.plan}`,
     'reasoning',
   );
-
-  return {
-    current_phase: 'execution',
-    strategy: strategyText,
-    messages: [`[strategy] Developed execution strategy`],
-  };
+  return { current_phase: 'execution', strategy: strategyText, messages: ['[strategy] Developed strategy'] };
 }
 
-// ===== Execution Agent =====
-
+// ===== Execution =====
 async function executionNode(state: KalizaAgentState): Promise<Partial<KalizaAgentState>> {
   logger.info('Execution agent working', { taskId: state.task_id });
-
   const results: string[] = [];
-
-  // Provision a sandbox if execution requires isolated compute
   let sandboxId = state.sandbox_id;
+
   if (!sandboxId) {
     try {
-      const sandbox = await provisionSandbox({
-        workspace_id: state.workspace_id,
-        task_id: state.task_id,
-      });
+      const sandbox = await provisionSandbox({ workspace_id: state.workspace_id, task_id: state.task_id });
       sandboxId = sandbox.id;
-      logger.info('Sandbox provisioned for execution', { taskId: state.task_id, sandboxId });
     } catch (err) {
-      logger.warn('Sandbox provisioning failed, continuing without sandbox', { error: err instanceof Error ? err.message : String(err) });
+      logger.warn('Sandbox provisioning failed', { error: err instanceof Error ? err.message : String(err) });
     }
   }
 
-  // Execute a command in the sandbox if available
   if (sandboxId) {
     try {
-      const result = await executeInSandbox({
-        sandbox_id: sandboxId,
-        command: 'echo "Kaliza agent execution environment ready" && uname -a',
-      });
-      results.push(`Sandbox execution: exit=${result.exit_code}, stdout=${result.stdout}`);
+      const result = await executeInSandbox({ sandbox_id: sandboxId, command: 'echo "Kaliza agent environment ready" && uname -a' });
+      results.push(`Sandbox: exit=${result.exit_code}, stdout=${result.stdout}`);
     } catch (err) {
-      results.push(`Sandbox execution error: ${err instanceof Error ? err.message : String(err)}`);
+      results.push(`Sandbox error: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  // Check if the strategy requires any tool execution through the tool gateway
   const execResult = await callAgentModel(
     state,
-    `You are the Kaliza Execution agent. Carry out approved actions through the tool gateway.
-For each action, check if it requires approval. If it does, report that approval is needed.
-
-Available tools: ${state.tool_allowlist.join(', ') || 'none configured'}`,
-    `Objective: ${state.objective}\nStrategy: ${state.strategy}\nSandbox available: ${sandboxId ? 'yes' : 'no'}`,
+    `You are the Kaliza Execution agent. Carry out approved actions through the tool gateway. Report if approval is needed for high-risk actions.`,
+    `Objective: ${state.objective}\nStrategy: ${state.strategy}\nSandbox: ${sandboxId ? 'yes' : 'no'}`,
     'reasoning',
   );
-
   results.push(execResult);
 
-  return {
-    current_phase: 'content',
-    execution_results: results,
-    sandbox_id: sandboxId,
-    messages: [`[execution] Completed execution phase`],
-  };
+  return { current_phase: 'content', execution_results: results, sandbox_id: sandboxId, messages: ['[execution] Completed'] };
 }
 
-// ===== Content Agent =====
-
+// ===== Content =====
 async function contentNode(state: KalizaAgentState): Promise<Partial<KalizaAgentState>> {
   logger.info('Content agent working', { taskId: state.task_id });
-
   const deliverable = await callAgentModel(
     state,
-    `You are the Kaliza Content agent. Produce the final deliverables based on all prior work.
-This may include documents, proposals, messages, reports, or other content.
-Do not publish or send consequential external communications without authorization.`,
+    `You are the Kaliza Content agent. Produce final deliverables. Do not publish or send external communications without authorization.`,
     `Objective: ${state.objective}\nResearch: ${state.research_findings}\nStrategy: ${state.strategy}\nExecution: ${state.execution_results.join('\n')}`,
     'content',
   );
-
-  return {
-    current_phase: 'review',
-    content_deliverables: [deliverable],
-    messages: [`[content] Produced deliverables`],
-  };
+  return { current_phase: 'review', content_deliverables: [deliverable], messages: ['[content] Produced deliverables'] };
 }
 
-// ===== Review Agent =====
-
+// ===== Review =====
 async function reviewNode(state: KalizaAgentState): Promise<Partial<KalizaAgentState>> {
   logger.info('Review agent working', { taskId: state.task_id });
-
   const reviewText = await callAgentModel(
     state,
-    `You are the Kaliza Review agent. Check the results against the original objective.
-Validate deliverables and execution outcomes. Identify missing information, errors, or incomplete steps.
-Respond with PASS or FAIL and a summary of your assessment.`,
-    `Objective: ${state.objective}\nPlan: ${state.plan}\nDeliverables: ${state.content_deliverables.join('\n')}\nExecution results: ${state.execution_results.join('\n')}`,
+    `You are the Kaliza Review agent. Check results against the objective. Respond with PASS or FAIL and a summary.`,
+    `Objective: ${state.objective}\nDeliverables: ${state.content_deliverables.join('\n')}\nExecution: ${state.execution_results.join('\n')}`,
     'reasoning',
   );
-
-  return {
-    current_phase: 'review',
-    review_result: reviewText,
-    messages: [`[review] ${reviewText.substring(0, 100)}`],
-  };
-}
-
-// ===== Approval Gate =====
-
-async function approvalGateNode(state: KalizaAgentState): Promise<Partial<KalizaAgentState>> {
-  if (state.pending_approval_id) {
-    const approval = await getApproval(state.pending_approval_id);
-    if (approval.decision === 'APPROVED') {
-      return {
-        pending_approval_id: null,
-        approval_decision: 'APPROVED',
-        messages: [`[approval-gate] Approved, resuming execution`],
-      };
-    }
-    if (approval.decision === 'REJECTED') {
-      return {
-        pending_approval_id: null,
-        approval_decision: 'REJECTED',
-        status: AgentRunStatus.FAILED,
-        current_phase: 'end',
-        messages: [`[approval-gate] Rejected, stopping execution`],
-      };
-    }
-    // Still pending
-    return {
-      status: AgentRunStatus.AWAITING_APPROVAL,
-      messages: [`[approval-gate] Still awaiting approval`],
-    };
-  }
-  return {};
+  return { current_phase: 'review', review_result: reviewText, messages: [`[review] ${reviewText.substring(0, 100)}`] };
 }
 
 // ===== Routing =====
-
 function routeAfterSupervisor(state: KalizaAgentState): string {
-  if (state.current_phase === 'end' || state.status === AgentRunStatus.COMPLETED || state.status === AgentRunStatus.FAILED) {
-    return END;
-  }
+  if (state.current_phase === 'end' || state.status === AgentRunStatus.COMPLETED || state.status === AgentRunStatus.FAILED) return END;
   if (state.current_phase === 'planning') return 'planning';
   if (state.current_phase === 'review') return 'review';
   return 'planning';
 }
 
-function routeAfterReview(state: KalizaAgentState): string {
-  if (state.review_result.includes('PASS') || state.review_result.includes('COMPLETE')) {
-    return 'supervisor';
-  }
-  return 'supervisor';
-}
-
-// ===== Build the Graph =====
-
-export function buildAgentGraph(): CompiledStateGraph<typeof AgentState.State> {
+// ===== Build =====
+export function buildAgentGraph() {
   const graph = new StateGraph(AgentState)
     .addNode('supervisor', supervisorNode)
     .addNode('planning', planningNode)
@@ -347,7 +195,6 @@ export function buildAgentGraph(): CompiledStateGraph<typeof AgentState.State> {
     .addNode('execution', executionNode)
     .addNode('content', contentNode)
     .addNode('review', reviewNode)
-    .addNode('approval_gate', approvalGateNode)
     .addEdge(START, 'supervisor')
     .addConditionalEdges('supervisor', routeAfterSupervisor)
     .addEdge('planning', 'research')
@@ -355,13 +202,11 @@ export function buildAgentGraph(): CompiledStateGraph<typeof AgentState.State> {
     .addEdge('strategy', 'execution')
     .addEdge('execution', 'content')
     .addEdge('content', 'review')
-    .addConditionalEdges('review', routeAfterReview)
-    .addEdge('approval_gate', 'execution');
-
+    .addEdge('review', 'supervisor');
   return graph.compile();
 }
 
-export function buildAgentGraphWithCheckpoint(workspaceId: string): CompiledStateGraph<typeof AgentState.State> {
+export function buildAgentGraphWithCheckpoint(workspaceId: string) {
   const checkpointer = new SupabaseCheckpointSaver(workspaceId);
   const graph = new StateGraph(AgentState)
     .addNode('supervisor', supervisorNode)
@@ -371,7 +216,6 @@ export function buildAgentGraphWithCheckpoint(workspaceId: string): CompiledStat
     .addNode('execution', executionNode)
     .addNode('content', contentNode)
     .addNode('review', reviewNode)
-    .addNode('approval_gate', approvalGateNode)
     .addEdge(START, 'supervisor')
     .addConditionalEdges('supervisor', routeAfterSupervisor)
     .addEdge('planning', 'research')
@@ -379,12 +223,6 @@ export function buildAgentGraphWithCheckpoint(workspaceId: string): CompiledStat
     .addEdge('strategy', 'execution')
     .addEdge('execution', 'content')
     .addEdge('content', 'review')
-    .addConditionalEdges('review', routeAfterReview)
-    .addEdge('approval_gate', 'execution');
-
+    .addEdge('review', 'supervisor');
   return graph.compile({ checkpointer });
-}
-
-export async function createCheckpointSaver(workspaceId: string): Promise<CheckpointSaver> {
-  return new SupabaseCheckpointSaver(workspaceId);
 }

@@ -15,10 +15,9 @@ export async function startTemporalWorker(): Promise<Worker> {
   const taskQueue = getTaskQueue();
 
   worker = await Worker.create({
-    workflowPath: new URL('./agent-workflow.js', import.meta.url).pathname,
+    workflowsPath: new URL('./agent-workflow.js', import.meta.url).pathname,
     activities,
     taskQueue,
-    client,
   });
 
   logger.info('Temporal worker starting', { taskQueue });
