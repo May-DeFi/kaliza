@@ -1,0 +1,48 @@
+{
+  "name": "kaliza",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Kaliza — AI-powered opportunity discovery and execution platform backend",
+  "main": "dist/api/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/api/index.js",
+    "dev": "tsx watch src/api/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint 'src/**/*.ts'",
+    "migration:status": "echo 'Migrations are applied via Supabase MCP apply_migration tool'"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "express": "^4.21.0",
+    "helmet": "^8.0.0",
+    "cors": "^2.8.5",
+    "morgan": "^1.10.0",
+    "dotenv": "^16.4.5",
+    "ulid": "^2.3.0",
+    "zod": "^3.23.8",
+    "jsonwebtoken": "^9.0.2",
+    "bcryptjs": "^2.4.3",
+    "express-rate-limit": "^7.4.0",
+    "uuid": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/cors": "^2.8.17",
+    "@types/morgan": "^1.9.9",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/uuid": "^10.0.0",
+    "@types/node": "^22.7.0",
+    "typescript": "^5.6.2",
+    "tsx": "^4.19.1",
+    "vitest": "^2.1.1",
+    "@vitest/coverage-v8": "^2.1.1",
+    "eslint": "^9.11.0",
+    "@typescript-eslint/parser": "^8.7.0",
+    "@typescript-eslint/eslint-plugin": "^8.7.0"
+  }
+}
