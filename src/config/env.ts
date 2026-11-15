@@ -37,6 +37,17 @@ export const env = {
     apiUrl: required('DAYTONA_API_URL', 'https://app.daytona.ai'),
     apiKey: required('DAYTONA_API_KEY', 'placeholder_daytona_api_key'),
   },
+  temporal: {
+    address: required('TEMPORAL_ADDRESS', 'localhost:7233'),
+    namespace: required('TEMPORAL_NAMESPACE', 'default'),
+    taskQueue: required('TEMPORAL_TASK_QUEUE', 'kaliza'),
+    clientCertPath: required('TEMPORAL_CLIENT_CERT_PATH', ''),
+    clientKeyPath: required('TEMPORAL_CLIENT_KEY_PATH', ''),
+  },
+  runtime: {
+    mode: required('KALIZA_RUNTIME_MODE', 'development') as 'development' | 'production',
+    checkpointTable: required('LANGGRAPH_CHECKPOINT_TABLE', 'langgraph_checkpoints'),
+  },
   ai: {
     openaiApiKey: required('OPENAI_API_KEY', 'placeholder_openai_api_key'),
     anthropicApiKey: required('ANTHROPIC_API_KEY', 'placeholder_anthropic_api_key'),
