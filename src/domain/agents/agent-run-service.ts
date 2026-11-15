@@ -2,17 +2,56 @@ import { getSupabaseAdminClient } from '../../adapters/database/supabase.js';
 import type { AgentRun } from '../../contracts/types.js';
 import { NotFoundError } from '../../api/middleware/errors.js';
 import { AgentRunStatus, type AgentRunStatusValue } from '../../config/constants.js';
-import { getOrchestrator } from '../../adapters/orchestration/stub-orchestrator.js';
+import { getOrchestrator, setOrchestrator } from '../../adapters/orchestration/stub-orchestrator.js';
+import { isTemporalConfigured } from '../../adapters/temporal/temporal-client.js';
+import { TemporalLangGraphOrchestrator } from '../../adapters/orchestration/temporal-orchestrator.js';
+import { env } from '../../config/env.js';
+import { logger } from '../../config/logger.js';
 import type { CreateRunInput, RunSnapshot } from './orchestrator.js';
 
+let orchestratorInitialized = false;
+
+function ensureOrchestrator(): void {
+  if (orchestratorInitialized) return;
+
+  if (env.runtime.mode === 'production' && !isTemporalConfigured()) {
+    throw new Error('Production mode requires a configured Temporal server. Set TEMPORAL_ADDRESS and ensure the server is running.');
+  }
+
+  if (isTemporalConfigured()) {
+    logger.info('Initializing Temporal+LangGraph orchestrator');
+    setOrchestrator(new TemporalLangGraphOrchestrator());
+  } else if (env.runtime.mode === 'production') {
+    throw new Error('Production mode requires Temporal — cannot use stub orchestrator');
+  }
+
+  orchestratorInitialized = true;
+}
+
+export function getActiveOrchestrator() {
+  ensureOrchestrator();
+  return getOrchestrator();
+}
+
+export async function updateAgentRunStatus(agentRunId: string, status: AgentRunStatusValue, metadata?: Record<string, unknown>): Promise<void> {
+  const supabase = getSupabaseAdminClient();
+  const { error } = await supabase
+    .from('agent_runs')
+    .update({ status, trace_metadata: metadata ?? {}, updated_at: new Date().toISOString() })
+    .eq('id', agentRunId);
+  if (error) throw error;
+}
+
 export async function createAgentRun(input: CreateRunInput): Promise<{ agentRun: AgentRun; runReference: { run_id: string; task_id: string; status: string } }> {
+  ensureOrchestrator();
+
   const supabase = getSupabaseAdminClient();
 
   const { data, error } = await supabase
     .from('agent_runs')
     .insert({
       task_id: input.task_id,
-      orchestrator: 'kaliza-default',
+      orchestrator: isTemporalConfigured() ? 'temporal-langgraph' : 'stub',
       status: AgentRunStatus.CREATED,
       trace_metadata: {},
     })
@@ -30,6 +69,7 @@ export async function createAgentRun(input: CreateRunInput): Promise<{ agentRun:
     .update({
       external_run_id: runRef.run_id,
       status: AgentRunStatus.RUNNING,
+      temporal_workflow_id: runRef.run_id,
       updated_at: new Date().toISOString(),
     })
     .eq('id', agentRun.id);

@@ -12,6 +12,7 @@ import type {
 } from '../../domain/agents/orchestrator.js';
 import { AgentRunStatus } from '../../config/constants.js';
 import { logger } from '../../config/logger.js';
+import { env } from '../../config/env.js';
 
 const runs = new Map<string, { task_id: string; status: string; objective: string; output?: Record<string, unknown> }>();
 
@@ -20,7 +21,7 @@ export class StubOrchestrator implements AgentOrchestrator {
     const runId = crypto.randomUUID();
     runs.set(runId, { task_id: input.task_id, status: AgentRunStatus.RUNNING, objective: input.objective });
 
-    logger.info('Stub orchestrator: run created', { runId, taskId: input.task_id });
+    logger.warn('STUB ORCHESTRATOR: creating simulated run — this is NOT a real agent execution', { runId, taskId: input.task_id });
 
     setTimeout(() => {
       const run = runs.get(runId);
@@ -77,17 +78,23 @@ export class StubOrchestrator implements AgentOrchestrator {
   }
 }
 
-import type { AgentRunStatusValue } from '../../config/constants.js';
-
 let activeOrchestrator: AgentOrchestrator | null = null;
 
 export function getOrchestrator(): AgentOrchestrator {
-  if (!activeOrchestrator) {
-    activeOrchestrator = new StubOrchestrator();
+  if (activeOrchestrator) return activeOrchestrator;
+
+  if (env.runtime.mode === 'production') {
+    throw new Error(
+      'Production runtime mode requires a real Temporal server. Set KALIZA_RUNTIME_MODE=development for testing or configure Temporal and restart.',
+    );
   }
+
+  logger.warn('Using StubOrchestrator — simulated agent execution. This must not be used in production.');
+  activeOrchestrator = new StubOrchestrator();
   return activeOrchestrator;
 }
 
 export function setOrchestrator(orch: AgentOrchestrator): void {
   activeOrchestrator = orch;
 }
+
