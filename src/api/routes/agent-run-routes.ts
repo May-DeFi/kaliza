@@ -19,7 +19,6 @@ const router = Router();
 const createSchema = z.object({
   task_id: z.string().uuid(),
   workspace_id: z.string().uuid(),
-  user_id: z.string().uuid(),
   service_id: z.string(),
   objective: z.string().min(1),
   tool_allowlist: z.array(z.string()).optional(),
@@ -30,7 +29,8 @@ router.post('/', authenticate, async (req: AuthenticatedRequest, res, next) => {
   try {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError('Invalid input', parsed.error.issues);
-    const result = await createAgentRun(parsed.data);
+    if (!req.userId) throw new ValidationError('Authentication required');
+    const result = await createAgentRun({ ...parsed.data, user_id: req.userId });
     created(res, result);
   } catch (err) {
     next(err);

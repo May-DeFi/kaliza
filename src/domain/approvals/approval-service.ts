@@ -1,11 +1,12 @@
 import { getSupabaseAdminClient } from '../../adapters/database/supabase.js';
 import type { Approval } from '../../contracts/types.js';
 import { NotFoundError, ConflictError, ForbiddenError } from '../../api/middleware/errors.js';
-import { ApprovalStatus, type RiskClassValue, type ApprovalStatusValue } from '../../config/constants.js';
+import { AgentRunStatus, ApprovalStatus, MembershipRole, TaskStatus, type RiskClassValue, type ApprovalStatusValue } from '../../config/constants.js';
 import { computeActionHash, hasPayloadChanged } from '../policies/policy-engine.js';
 import { recordAuditEvent } from '../audit/audit-service.js';
 import { getTemporalClient, isTemporalConfigured } from '../../adapters/temporal/temporal-client.js';
 import { logger } from '../../config/logger.js';
+import { getMembership } from '../tenancy/workspace-service.js';
 
 export async function createApproval(input: {
   task_id: string;
@@ -112,12 +113,29 @@ export async function decideApproval(input: {
     throw new ForbiddenError('Approval does not belong to this workspace');
   }
 
+  const membership = await getMembership(input.workspace_id, input.approver_id);
+  if (!membership || (membership.role !== MembershipRole.OWNER && membership.role !== MembershipRole.ADMIN)) {
+    throw new ForbiddenError('Approver is not authorized to decide approvals in this workspace');
+  }
+
+  const supabase = getSupabaseAdminClient();
+  const { data: task, error: taskErr } = await supabase
+    .from('tasks')
+    .select('workspace_id, status')
+    .eq('id', approval.task_id)
+    .maybeSingle();
+
+  if (taskErr) throw taskErr;
+  if (!task || task.workspace_id !== input.workspace_id || task.status !== TaskStatus.AWAITING_APPROVAL) {
+    throw new ConflictError('Approval task is no longer awaiting approval in this workspace');
+  }
+
   if (approval.decision !== ApprovalStatus.PENDING) {
     throw new ConflictError('Approval has already been decided');
   }
 
-  if (new Date(approval.expiry ?? '') < new Date()) {
-    await updateApprovalStatus(input.approval_id, ApprovalStatus.EXPIRED);
+  if (!approval.expiry || new Date(approval.expiry).getTime() <= Date.now()) {
+    await expirePendingApproval(input.approval_id);
     throw new ConflictError('Approval has expired');
   }
 
@@ -129,22 +147,16 @@ export async function decideApproval(input: {
 
   if (input.decision === ApprovalStatus.CHANGES_REQUESTED) {
     const newHash = input.modified_payload ? computeActionHash(input.modified_payload) : approval.action_hash;
-    const supabase = getSupabaseAdminClient();
-    const { data, error } = await supabase
-      .from('approvals')
-      .update({
-        decision: ApprovalStatus.CHANGES_REQUESTED,
-        approver_id: input.approver_id,
-        decided_at: new Date().toISOString(),
+    const updated = await updateApprovalStatusWithApprover(
+      input.approval_id,
+      input.decision,
+      input.approver_id,
+      {
         action_hash: newHash,
         payload: input.modified_payload ?? approval.payload,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', input.approval_id)
-      .select('*')
-      .single();
-
-    if (error) throw error;
+      },
+    );
+    await signalTemporalWorkflowForApproval(approval.task_id, input.approval_id, input.decision);
 
     await recordAuditEvent({
       workspace_id: input.workspace_id,
@@ -155,7 +167,7 @@ export async function decideApproval(input: {
       metadata: { task_id: approval.task_id },
     });
 
-    return data as Approval;
+    return updated;
   }
 
   const updated = await updateApprovalStatusWithApprover(
@@ -181,8 +193,30 @@ export async function decideApproval(input: {
 async function signalTemporalWorkflowForApproval(taskId: string, approvalId: string, decision: string): Promise<void> {
   if (!isTemporalConfigured()) return;
   try {
+    const supabase = getSupabaseAdminClient();
+    const { data: agentRun, error } = await supabase
+      .from('agent_runs')
+      .select('external_run_id, temporal_workflow_id')
+      .eq('task_id', taskId)
+      .in('status', [
+        AgentRunStatus.CREATED,
+        AgentRunStatus.RUNNING,
+        AgentRunStatus.PAUSED,
+        AgentRunStatus.AWAITING_APPROVAL,
+        AgentRunStatus.AWAITING_INPUT,
+      ])
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) throw error;
+    const workflowId = agentRun?.external_run_id ?? agentRun?.temporal_workflow_id;
+    if (!workflowId) {
+      logger.warn('No active Temporal workflow found for approval', { taskId, approvalId, decision });
+      return;
+    }
+
     const client = await getTemporalClient();
-    const workflowId = `kaliza-task-${taskId}`;
     const handle = client.workflow.getHandle(workflowId);
     await handle.signal('approvalDecision', approvalId, decision);
     logger.info('Sent approval signal to Temporal workflow', { workflowId, approvalId, decision });
@@ -194,35 +228,45 @@ async function signalTemporalWorkflowForApproval(taskId: string, approvalId: str
   }
 }
 
-async function updateApprovalStatus(id: string, status: ApprovalStatusValue): Promise<void> {
+async function expirePendingApproval(id: string): Promise<void> {
   const supabase = getSupabaseAdminClient();
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('approvals')
-    .update({ decision: status, updated_at: new Date().toISOString() })
-    .eq('id', id);
+    .update({ decision: ApprovalStatus.EXPIRED, updated_at: new Date().toISOString() })
+    .eq('id', id)
+    .eq('decision', ApprovalStatus.PENDING)
+    .select('id')
+    .maybeSingle();
 
   if (error) throw error;
+  if (!data) throw new ConflictError('Approval has already been decided');
 }
 
 async function updateApprovalStatusWithApprover(
   id: string,
   status: ApprovalStatusValue,
   approverId: string,
+  updates: Record<string, unknown> = {},
 ): Promise<Approval> {
   const supabase = getSupabaseAdminClient();
+  const now = new Date().toISOString();
   const { data, error } = await supabase
     .from('approvals')
     .update({
+      ...updates,
       decision: status,
       approver_id: approverId,
-      decided_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      decided_at: now,
+      updated_at: now,
     })
     .eq('id', id)
+    .eq('decision', ApprovalStatus.PENDING)
+    .gt('expiry', now)
     .select('*')
-    .single();
+    .maybeSingle();
 
   if (error) throw error;
+  if (!data) throw new ConflictError('Approval is stale, expired, or has already been decided');
   return data as Approval;
 }
 

@@ -1,13 +1,14 @@
 import { getSupabaseAdminClient } from '../../adapters/database/supabase.js';
 import type { AgentRun } from '../../contracts/types.js';
-import { NotFoundError } from '../../api/middleware/errors.js';
+import { ConflictError, ForbiddenError, NotFoundError } from '../../api/middleware/errors.js';
 import { AgentRunStatus, type AgentRunStatusValue } from '../../config/constants.js';
 import { getOrchestrator, setOrchestrator } from '../../adapters/orchestration/stub-orchestrator.js';
 import { isTemporalConfigured } from '../../adapters/temporal/temporal-client.js';
-import { TemporalLangGraphOrchestrator } from '../../adapters/orchestration/temporal-orchestrator.js';
+import { getTemporalWorkflowId, TemporalLangGraphOrchestrator } from '../../adapters/orchestration/temporal-orchestrator.js';
 import { env } from '../../config/env.js';
 import { logger } from '../../config/logger.js';
 import type { CreateRunInput, RunSnapshot } from './orchestrator.js';
+import { getMembership } from '../tenancy/workspace-service.js';
 
 let orchestratorInitialized = false;
 
@@ -54,16 +55,31 @@ export async function createAgentRun(input: CreateRunInput): Promise<{ agentRun:
   ensureOrchestrator();
 
   const supabase = getSupabaseAdminClient();
+  const { data: task, error: taskErr } = await supabase
+    .from('tasks')
+    .select('workspace_id, user_id')
+    .eq('id', input.task_id)
+    .maybeSingle();
+
+  if (taskErr) throw taskErr;
+  if (!task) throw new NotFoundError('Task', input.task_id);
+  if (task.workspace_id !== input.workspace_id || (task.user_id && task.user_id !== input.user_id)) {
+    throw new ForbiddenError('Task does not belong to the supplied workspace and user');
+  }
+  if (!await getMembership(input.workspace_id, input.user_id)) {
+    throw new ForbiddenError('User is not a member of the supplied workspace');
+  }
 
   const { data: existingRuns, error: existingErr } = await supabase
     .from('agent_runs')
     .select('*')
     .eq('task_id', input.task_id)
+    .in('status', ACTIVE_RUN_STATUSES)
     .order('created_at', { ascending: false });
 
   if (existingErr) throw existingErr;
 
-  const activeRun = (existingRuns ?? []).find((run) => ACTIVE_RUN_STATUSES.includes(run.status as AgentRunStatusValue));
+  const activeRun = existingRuns?.[0];
 
   if (activeRun) {
     return {
@@ -91,32 +107,60 @@ export async function createAgentRun(input: CreateRunInput): Promise<{ agentRun:
     if (error) throw error;
     const agentRun = data as AgentRun;
 
-    const orchestrator = getOrchestrator();
-    const runRef = await orchestrator.createRun(input);
+    if (isTemporalConfigured()) {
+      const { error: workflowIdErr } = await supabase
+        .from('agent_runs')
+        .update({ temporal_workflow_id: getTemporalWorkflowId(input.task_id, agentRun.id) })
+        .eq('id', agentRun.id);
+      if (workflowIdErr) throw workflowIdErr;
+    }
 
-    const { error: updateErr } = await supabase
+    const orchestrator = getOrchestrator();
+    const runRef = await orchestrator.createRun({ ...input, agent_run_record_id: agentRun.id });
+
+    const { error: referenceErr } = await supabase
       .from('agent_runs')
       .update({
         external_run_id: runRef.run_id,
-        status: AgentRunStatus.RUNNING,
         temporal_workflow_id: runRef.run_id,
         updated_at: new Date().toISOString(),
       })
       .eq('id', agentRun.id);
 
-    if (updateErr) throw updateErr;
+    if (referenceErr) throw referenceErr;
 
-    return { agentRun: { ...agentRun, external_run_id: runRef.run_id, status: AgentRunStatus.RUNNING }, runReference: runRef };
+    const { data: startedRun, error: statusErr } = await supabase
+      .from('agent_runs')
+      .update({ status: AgentRunStatus.RUNNING, updated_at: new Date().toISOString() })
+      .eq('id', agentRun.id)
+      .eq('status', AgentRunStatus.CREATED)
+      .select('*')
+      .maybeSingle();
+
+    if (statusErr) throw statusErr;
+    const { data: currentRun, error: currentErr } = startedRun
+      ? { data: startedRun, error: null }
+      : await supabase.from('agent_runs').select('*').eq('id', agentRun.id).maybeSingle();
+    if (currentErr) throw currentErr;
+    if (!currentRun) throw new NotFoundError('AgentRun', agentRun.id);
+
+    return {
+      agentRun: currentRun as AgentRun,
+      runReference: { ...runRef, status: currentRun.status },
+    };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.toLowerCase().includes('duplicate') || message.toLowerCase().includes('already')) {
+    const errorCode = typeof err === 'object' && err !== null && 'code' in err
+      ? String((err as { code: unknown }).code)
+      : '';
+    if (errorCode === '23505') {
       const { data: retryRuns, error: retryErr } = await supabase
         .from('agent_runs')
         .select('*')
         .eq('task_id', input.task_id)
+        .in('status', ACTIVE_RUN_STATUSES)
         .order('created_at', { ascending: false });
       if (retryErr) throw retryErr;
-      const retryRun = (retryRuns ?? []).find((run) => ACTIVE_RUN_STATUSES.includes(run.status as AgentRunStatusValue));
+      const retryRun = retryRuns?.[0];
       if (retryRun) {
         return {
           agentRun: retryRun as AgentRun,
@@ -159,61 +203,100 @@ export async function listTaskAgentRuns(taskId: string): Promise<AgentRun[]> {
 
 export async function pauseAgentRun(agentRunId: string): Promise<AgentRun> {
   const agentRun = await getAgentRun(agentRunId);
-  const orchestrator = getOrchestrator();
-
-  if (agentRun.external_run_id) {
-    await orchestrator.pauseRun({ run_id: agentRun.external_run_id, task_id: agentRun.task_id });
-  }
+  const orchestrator = getActiveOrchestrator();
 
   const supabase = getSupabaseAdminClient();
   const { data, error } = await supabase
     .from('agent_runs')
-    .update({ status: AgentRunStatus.PAUSED, updated_at: new Date().toISOString() })
+    .update({
+      status: AgentRunStatus.PAUSED,
+      trace_metadata: { ...(agentRun.trace_metadata ?? {}), paused_from_status: agentRun.status },
+      updated_at: new Date().toISOString(),
+    })
     .eq('id', agentRunId)
+    .in('status', [AgentRunStatus.CREATED, AgentRunStatus.RUNNING, AgentRunStatus.AWAITING_APPROVAL, AgentRunStatus.AWAITING_INPUT])
     .select('*')
-    .single();
+    .maybeSingle();
 
   if (error) throw error;
+  if (!data) {
+    const currentRun = await getAgentRun(agentRunId);
+    if (currentRun.status === AgentRunStatus.PAUSED && currentRun.external_run_id) {
+      await orchestrator.pauseRun({ run_id: currentRun.external_run_id, task_id: currentRun.task_id });
+    }
+    return currentRun;
+  }
+
+  if (agentRun.external_run_id) {
+    await orchestrator.pauseRun({ run_id: agentRun.external_run_id, task_id: agentRun.task_id });
+  }
   return data as AgentRun;
 }
 
 export async function cancelAgentRun(agentRunId: string): Promise<AgentRun> {
   const agentRun = await getAgentRun(agentRunId);
-  const orchestrator = getOrchestrator();
-
-  if (agentRun.external_run_id) {
-    await orchestrator.cancelRun({ run_id: agentRun.external_run_id, task_id: agentRun.task_id });
-  }
+  const orchestrator = getActiveOrchestrator();
 
   const supabase = getSupabaseAdminClient();
   const { data, error } = await supabase
     .from('agent_runs')
     .update({ status: AgentRunStatus.CANCELLED, updated_at: new Date().toISOString() })
     .eq('id', agentRunId)
+    .in('status', ACTIVE_RUN_STATUSES)
     .select('*')
-    .single();
+    .maybeSingle();
 
   if (error) throw error;
+  if (!data) {
+    const currentRun = await getAgentRun(agentRunId);
+    if (currentRun.status === AgentRunStatus.CANCELLED && currentRun.external_run_id) {
+      await orchestrator.cancelRun({ run_id: currentRun.external_run_id, task_id: currentRun.task_id });
+    }
+    return currentRun;
+  }
+
+  if (agentRun.external_run_id) {
+    await orchestrator.cancelRun({ run_id: agentRun.external_run_id, task_id: agentRun.task_id });
+  }
   return data as AgentRun;
 }
 
 export async function resumeAgentRun(agentRunId: string, userInput?: string): Promise<AgentRun> {
   const agentRun = await getAgentRun(agentRunId);
-  const orchestrator = getOrchestrator();
+  if (agentRun.status !== AgentRunStatus.PAUSED && agentRun.status !== AgentRunStatus.AWAITING_INPUT) {
+    throw new ConflictError(`Cannot resume agent run in status ${agentRun.status}`);
+  }
+  const resumeFromApproval = agentRun.trace_metadata?.paused_from_status === AgentRunStatus.AWAITING_APPROVAL;
+  if (resumeFromApproval && userInput?.trim()) {
+    throw new ConflictError('User input cannot replace a pending approval decision');
+  }
+  const { paused_from_status: _pausedFromStatus, ...traceMetadata } = agentRun.trace_metadata ?? {};
+  const nextStatus = resumeFromApproval ? AgentRunStatus.AWAITING_APPROVAL : AgentRunStatus.RUNNING;
+  const orchestrator = getActiveOrchestrator();
 
   if (agentRun.external_run_id) {
-    await orchestrator.resumeRun({ run_id: agentRun.external_run_id, task_id: agentRun.task_id, user_input: userInput });
+    await orchestrator.resumeRun({
+      run_id: agentRun.external_run_id,
+      task_id: agentRun.task_id,
+      user_input: resumeFromApproval ? undefined : userInput,
+    });
   }
 
   const supabase = getSupabaseAdminClient();
   const { data, error } = await supabase
     .from('agent_runs')
-    .update({ status: AgentRunStatus.RUNNING, updated_at: new Date().toISOString() })
+    .update({
+      status: nextStatus,
+      trace_metadata: traceMetadata,
+      updated_at: new Date().toISOString(),
+    })
     .eq('id', agentRunId)
+    .in('status', [AgentRunStatus.PAUSED, AgentRunStatus.AWAITING_INPUT])
     .select('*')
-    .single();
+    .maybeSingle();
 
   if (error) throw error;
+  if (!data) throw new ConflictError('Agent run changed state before it could be resumed');
   return data as AgentRun;
 }
 

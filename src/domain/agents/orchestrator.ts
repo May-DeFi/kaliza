@@ -5,6 +5,7 @@ export interface CreateRunInput {
   task_id: string;
   workspace_id: string;
   user_id: string;
+  agent_run_record_id?: string;
   service_id: string;
   objective: string;
   context_references?: string[];
