@@ -196,29 +196,29 @@ async function reviewNode(state: KalizaAgentState): Promise<Partial<KalizaAgentS
 // ===== Routing =====
 function routeAfterSupervisor(state: KalizaAgentState): string {
   if (state.current_phase === 'end' || state.status === AgentRunStatus.COMPLETED || state.status === AgentRunStatus.FAILED) return END;
-  if (state.current_phase === 'planning') return 'planning';
-  if (state.current_phase === 'review') return 'review';
-  return 'planning';
+  if (state.current_phase === 'planning') return 'planning_agent';
+  if (state.current_phase === 'review') return 'review_agent';
+  return 'planning_agent';
 }
 
 // ===== Build =====
 export function buildAgentGraph() {
   const graph = new StateGraph(AgentState)
     .addNode('supervisor', supervisorNode)
-    .addNode('planning', planningNode)
-    .addNode('research', researchNode)
-    .addNode('strategy', strategyNode)
-    .addNode('execution', executionNode)
-    .addNode('content', contentNode)
-    .addNode('review', reviewNode)
+    .addNode('planning_agent', planningNode)
+    .addNode('research_agent', researchNode)
+    .addNode('strategy_agent', strategyNode)
+    .addNode('execution_agent', executionNode)
+    .addNode('content_agent', contentNode)
+    .addNode('review_agent', reviewNode)
     .addEdge(START, 'supervisor')
     .addConditionalEdges('supervisor', routeAfterSupervisor)
-    .addEdge('planning', 'research')
-    .addEdge('research', 'strategy')
-    .addEdge('strategy', 'execution')
-    .addEdge('execution', 'content')
-    .addEdge('content', 'review')
-    .addEdge('review', 'supervisor');
+    .addEdge('planning_agent', 'research_agent')
+    .addEdge('research_agent', 'strategy_agent')
+    .addEdge('strategy_agent', 'execution_agent')
+    .addEdge('execution_agent', 'content_agent')
+    .addEdge('content_agent', 'review_agent')
+    .addEdge('review_agent', 'supervisor');
   return graph.compile();
 }
 
@@ -226,19 +226,19 @@ export function buildAgentGraphWithCheckpoint(workspaceId: string) {
   const checkpointer = new SupabaseCheckpointSaver(workspaceId);
   const graph = new StateGraph(AgentState)
     .addNode('supervisor', supervisorNode)
-    .addNode('planning', planningNode)
-    .addNode('research', researchNode)
-    .addNode('strategy', strategyNode)
-    .addNode('execution', executionNode)
-    .addNode('content', contentNode)
-    .addNode('review', reviewNode)
+    .addNode('planning_agent', planningNode)
+    .addNode('research_agent', researchNode)
+    .addNode('strategy_agent', strategyNode)
+    .addNode('execution_agent', executionNode)
+    .addNode('content_agent', contentNode)
+    .addNode('review_agent', reviewNode)
     .addEdge(START, 'supervisor')
     .addConditionalEdges('supervisor', routeAfterSupervisor)
-    .addEdge('planning', 'research')
-    .addEdge('research', 'strategy')
-    .addEdge('strategy', 'execution')
-    .addEdge('execution', 'content')
-    .addEdge('content', 'review')
-    .addEdge('review', 'supervisor');
+    .addEdge('planning_agent', 'research_agent')
+    .addEdge('research_agent', 'strategy_agent')
+    .addEdge('strategy_agent', 'execution_agent')
+    .addEdge('execution_agent', 'content_agent')
+    .addEdge('content_agent', 'review_agent')
+    .addEdge('review_agent', 'supervisor');
   return graph.compile({ checkpointer });
 }
