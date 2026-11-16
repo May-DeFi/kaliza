@@ -14,6 +14,7 @@ import { AgentRunStatus, type AgentRunStatusValue } from '../../config/constants
 import { getTemporalClient, getTaskQueue } from '../temporal/temporal-client.js';
 import { kalizaAgentWorkflow } from '../temporal/agent-workflow.js';
 import { logger } from '../../config/logger.js';
+import { WorkflowIdConflictPolicy } from '@temporalio/common';
 
 export class TemporalLangGraphOrchestrator implements AgentOrchestrator {
   async createRun(input: CreateRunInput): Promise<RunReference> {
@@ -36,16 +37,27 @@ export class TemporalLangGraphOrchestrator implements AgentOrchestrator {
       thread_id: threadId,
     };
 
-    const handle = await client.workflow.start(kalizaAgentWorkflow, {
-      workflowId,
-      taskQueue,
-      args: [agentRunInput],
-      workflowExecutionTimeout: '24 hours',
-      workflowRunTimeout: '2 hours',
-    });
+    try {
+      const handle = await client.workflow.start(kalizaAgentWorkflow, {
+        workflowId,
+        taskQueue,
+        args: [agentRunInput],
+        workflowExecutionTimeout: '24 hours',
+        workflowRunTimeout: '2 hours',
+        workflowIdConflictPolicy: WorkflowIdConflictPolicy.FAIL,
+      });
 
-    logger.info('Temporal workflow started', { workflowId, taskId: input.task_id, threadId });
-    return { run_id: handle.workflowId, task_id: input.task_id, status: AgentRunStatus.RUNNING };
+      logger.info('Temporal workflow started', { workflowId, taskId: input.task_id, threadId });
+      return { run_id: handle.workflowId, task_id: input.task_id, status: AgentRunStatus.RUNNING };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('already started') || msg.includes('WorkflowExecutionAlreadyStarted')) {
+        logger.info('Workflow already exists — treating as idempotent reuse', { workflowId, taskId: input.task_id });
+        const handle = client.workflow.getHandle(workflowId);
+        return { run_id: handle.workflowId, task_id: input.task_id, status: AgentRunStatus.RUNNING };
+      }
+      throw err;
+    }
   }
 
   async resumeRun(input: ResumeRunInput): Promise<RunReference> {

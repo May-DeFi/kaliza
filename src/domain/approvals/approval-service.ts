@@ -4,6 +4,8 @@ import { NotFoundError, ConflictError, ForbiddenError } from '../../api/middlewa
 import { ApprovalStatus, type RiskClassValue, type ApprovalStatusValue } from '../../config/constants.js';
 import { computeActionHash, hasPayloadChanged } from '../policies/policy-engine.js';
 import { recordAuditEvent } from '../audit/audit-service.js';
+import { getTemporalClient, isTemporalConfigured } from '../../adapters/temporal/temporal-client.js';
+import { logger } from '../../config/logger.js';
 
 export async function createApproval(input: {
   task_id: string;
@@ -136,6 +138,8 @@ export async function decideApproval(input: {
     input.approver_id,
   );
 
+  await signalTemporalWorkflowForApproval(approval.task_id, input.approval_id, input.decision);
+
   await recordAuditEvent({
     workspace_id: input.workspace_id,
     actor: input.approver_id,
@@ -146,6 +150,22 @@ export async function decideApproval(input: {
   });
 
   return updated;
+}
+
+async function signalTemporalWorkflowForApproval(taskId: string, approvalId: string, decision: string): Promise<void> {
+  if (!isTemporalConfigured()) return;
+  try {
+    const client = await getTemporalClient();
+    const workflowId = `kaliza-task-${taskId}`;
+    const handle = client.workflow.getHandle(workflowId);
+    await handle.signal('approvalDecision', approvalId, decision);
+    logger.info('Sent approval signal to Temporal workflow', { workflowId, approvalId, decision });
+  } catch (err) {
+    logger.warn('Failed to signal Temporal workflow for approval', {
+      taskId, approvalId, decision,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 async function updateApprovalStatus(id: string, status: ApprovalStatusValue): Promise<void> {

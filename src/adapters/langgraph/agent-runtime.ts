@@ -1,7 +1,8 @@
 import { StateGraph, Annotation, START, END } from '@langchain/langgraph';
 import { callModel } from '../../domain/models/model-gateway.js';
 import { transitionTask } from '../../domain/tasks/task-service.js';
-import { executeInSandbox, provisionSandbox } from '../../domain/tasks/sandbox-manager.js';
+import { provisionSandbox, executeInSandbox } from '../../domain/tasks/sandbox-manager.js';
+import { runAgentScript, getWorkspaceScopedCredentials, setSandboxEnvVar } from '../../domain/tasks/sandbox-execution.js';
 import { notifyTaskEvent } from '../../domain/notifications/notification-service.js';
 import { AgentRunStatus } from '../../config/constants.js';
 import { logger } from '../../config/logger.js';
@@ -135,8 +136,23 @@ async function executionNode(state: KalizaAgentState): Promise<Partial<KalizaAge
 
   if (sandboxId) {
     try {
+      const creds = await getWorkspaceScopedCredentials(state.workspace_id, state.task_id);
+      for (const [key, value] of Object.entries(creds)) {
+        await setSandboxEnvVar({ sandbox_id: sandboxId, key, value });
+      }
+
       const result = await executeInSandbox({ sandbox_id: sandboxId, command: 'echo "Kaliza agent environment ready" && uname -a' });
       results.push(`Sandbox: exit=${result.exit_code}, stdout=${result.stdout}`);
+
+      if (state.service_id === 'business-growth') {
+        const scriptResult = await runAgentScript({
+          sandbox_id: sandboxId,
+          language: 'python',
+          script: `import json\nresult = {"status": "analyzing", "objective": "${state.objective.replace(/"/g, '\\"')}"}\nprint(json.dumps(result))`,
+          timeout_ms: 30000,
+        });
+        results.push(`Business analysis script: exit=${scriptResult.exit_code}, output=${scriptResult.stdout}`);
+      }
     } catch (err) {
       results.push(`Sandbox error: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -144,8 +160,8 @@ async function executionNode(state: KalizaAgentState): Promise<Partial<KalizaAge
 
   const execResult = await callAgentModel(
     state,
-    `You are the Kaliza Execution agent. Carry out approved actions through the tool gateway. Report if approval is needed for high-risk actions.`,
-    `Objective: ${state.objective}\nStrategy: ${state.strategy}\nSandbox: ${sandboxId ? 'yes' : 'no'}`,
+    `You are the Kaliza Execution agent. Carry out approved actions through the tool gateway. Report if approval is needed for high-risk actions like publishing, spending, or sending external messages.`,
+    `Objective: ${state.objective}\nStrategy: ${state.strategy}\nSandbox: ${sandboxId ? 'yes' : 'no'}\nSandbox results: ${results.join('\n')}`,
     'reasoning',
   );
   results.push(execResult);
