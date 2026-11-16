@@ -78,6 +78,8 @@ export interface BusinessGrowthTaskInput {
   conversation_id?: string;
   objective: string;
   capability?: string;
+  task_id?: string;
+  idempotency_key?: string;
 }
 
 export async function startBusinessGrowthTask(input: BusinessGrowthTaskInput): Promise<{
@@ -85,13 +87,16 @@ export async function startBusinessGrowthTask(input: BusinessGrowthTaskInput): P
   agent_run_id: string;
   status: string;
 }> {
-  const task = await createTask({
-    workspace_id: input.workspace_id,
-    service_id: SERVICE_ID,
-    conversation_id: input.conversation_id,
-    objective: input.objective,
-    user_id: input.user_id,
-  });
+  const task = input.task_id
+    ? await getTask(input.task_id)
+    : await createTask({
+        workspace_id: input.workspace_id,
+        service_id: SERVICE_ID,
+        conversation_id: input.conversation_id,
+        objective: input.objective,
+        user_id: input.user_id,
+        idempotency_key: input.idempotency_key,
+      });
 
   await transitionTask(task.id, 'CLASSIFIED', 'system', `Classified as Business Growth task`);
 

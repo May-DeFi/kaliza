@@ -47,6 +47,27 @@ export async function createAgentRun(input: CreateRunInput): Promise<{ agentRun:
 
   const supabase = getSupabaseAdminClient();
 
+  const { data: existingRun, error: existingErr } = await supabase
+    .from('agent_runs')
+    .select('*')
+    .eq('task_id', input.task_id)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (existingErr) throw existingErr;
+  if (existingRun) {
+    const persisted = existingRun as AgentRun;
+    return {
+      agentRun: persisted,
+      runReference: {
+        run_id: persisted.external_run_id ?? persisted.id,
+        task_id: input.task_id,
+        status: persisted.status,
+      },
+    };
+  }
+
   const { data, error } = await supabase
     .from('agent_runs')
     .insert({

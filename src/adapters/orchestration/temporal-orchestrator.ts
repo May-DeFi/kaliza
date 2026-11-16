@@ -26,7 +26,7 @@ export class TemporalLangGraphOrchestrator implements AgentOrchestrator {
     const agentRunInput = {
       task_id: input.task_id,
       workspace_id: input.workspace_id,
-      user_id: input.workspace_id,
+      user_id: input.user_id ?? input.workspace_id,
       role: 'OWNER',
       objective: input.objective,
       service_id: input.service_id,
@@ -63,13 +63,18 @@ export class TemporalLangGraphOrchestrator implements AgentOrchestrator {
   async resumeRun(input: ResumeRunInput): Promise<RunReference> {
     const client = await getTemporalClient();
     const handle = client.workflow.getHandle(input.run_id);
-    if (input.approved_action) await handle.signal('approvalDecision', input.run_id, 'APPROVED');
+    if (input.approved_action) {
+      await handle.signal('approvalDecision', input.approved_action.action_id ?? input.run_id, 'APPROVED');
+    }
     if (input.user_input) await handle.signal('userInput', input.user_input);
-    logger.info('Workflow resumed', { runId: input.run_id, taskId: input.task_id });
+    logger.info('Workflow resumed', { runId: input.run_id, taskId: input.task_id, userInput: Boolean(input.user_input), approvedAction: Boolean(input.approved_action) });
     return { run_id: input.run_id, task_id: input.task_id, status: AgentRunStatus.RUNNING };
   }
 
   async pauseRun(input: PauseRunInput): Promise<void> {
+    const client = await getTemporalClient();
+    const handle = client.workflow.getHandle(input.run_id);
+    await handle.signal('pause');
     logger.info('Workflow pause requested', { runId: input.run_id, taskId: input.task_id });
   }
 

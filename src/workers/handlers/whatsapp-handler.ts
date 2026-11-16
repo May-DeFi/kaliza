@@ -3,7 +3,6 @@ import { logger } from '../../config/logger.js';
 import { findOrCreateUserByPhone } from '../../domain/identity/user-service.js';
 import { createIndividualWorkspace, listUserWorkspaces } from '../../domain/tenancy/workspace-service.js';
 import { getOrCreateConversation, addMessage } from '../../domain/conversations/conversation-service.js';
-import { createTask, getTask, transitionTask } from '../../domain/tasks/task-service.js';
 import { recordAuditEvent } from '../../domain/audit/audit-service.js';
 import { listPendingApprovals, decideApproval } from '../../domain/approvals/approval-service.js';
 import { startBusinessGrowthTask } from '../../services/business-growth/index.js';
@@ -68,12 +67,12 @@ export async function processWhatsAppMessage(job: QueuedJob): Promise<void> {
     return;
   }
 
-  const task = await createTask({
+  const { task_id } = await startBusinessGrowthTask({
     workspace_id: workspaceId,
-    service_id: ServiceId.BUSINESS_GROWTH,
+    user_id: user.id,
     conversation_id: conversation.id,
     objective: payload.text,
-    user_id: user.id,
+    idempotency_key: `whatsapp:${conversation.id}:${payload.message_id}`,
   });
 
   await recordAuditEvent({
@@ -81,22 +80,15 @@ export async function processWhatsAppMessage(job: QueuedJob): Promise<void> {
     actor: user.id,
     action: 'whatsapp.message.received',
     target: 'task',
-    target_id: task.id,
+    target_id: task_id,
     metadata: { message_id: payload.message_id, from: payload.from },
-  });
-
-  await startBusinessGrowthTask({
-    workspace_id: workspaceId,
-    user_id: user.id,
-    conversation_id: conversation.id,
-    objective: payload.text,
   });
 
   logger.info('WhatsApp message processed — agent pipeline started', {
     userId: user.id,
     workspaceId,
     conversationId: conversation.id,
-    taskId: task.id,
+    taskId: task_id,
   });
 }
 

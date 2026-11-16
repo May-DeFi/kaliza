@@ -86,6 +86,10 @@ export async function decideApproval(input: {
 }): Promise<Approval> {
   const approval = await getApproval(input.approval_id);
 
+  if (approval.workspace_id !== input.workspace_id) {
+    throw new ForbiddenError('Approval does not belong to this workspace');
+  }
+
   if (approval.decision !== ApprovalStatus.PENDING) {
     throw new ConflictError('Approval has already been decided');
   }
