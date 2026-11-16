@@ -14,6 +14,10 @@ const mockPendingApproval = {
 
 vi.mock('../adapters/database/supabase.js', () => ({
   getSupabaseAdminClient: () => {
+    const taskData = { id: 'task-1', workspace_id: 'ws-1', user_id: 'user-1', status: 'RECEIVED' };
+    const pendingApproval = { ...mockPendingApproval };
+    const approvedApproval = { ...mockPendingApproval, decision: 'APPROVED', approver_id: 'user-1' };
+
     const queryChain = (data: any) => ({
       select: vi.fn(() => queryChain(data)),
       eq: vi.fn(() => queryChain(data)),
@@ -27,12 +31,11 @@ vi.mock('../adapters/database/supabase.js', () => ({
       single: vi.fn().mockResolvedValue({ data, error: null }),
     });
 
-    let callCount = 0;
     return {
-      from: vi.fn(() => {
-        callCount++;
-        if (callCount === 1) return queryChain(mockPendingApproval);
-        return queryChain({ ...mockPendingApproval, decision: 'APPROVED', approver_id: 'user-1' });
+      from: vi.fn((table: string) => {
+        if (table === 'tasks') return queryChain(taskData);
+        if (table === 'approvals') return queryChain(pendingApproval);
+        return queryChain({});
       }),
     };
   },
@@ -75,6 +78,17 @@ describe('Approval Service with Temporal Signal Bridge', () => {
 
     expect(approval).toBeDefined();
     expect(approval.decision).toBe(ApprovalStatus.PENDING);
+  });
+
+  it('should reject malformed approval decisions', async () => {
+    await expect(
+      decideApproval({
+        approval_id: 'approval-1',
+        decision: 'REVOKED' as any,
+        approver_id: 'user-1',
+        workspace_id: 'ws-1',
+      }),
+    ).rejects.toThrow('Invalid approval decision');
   });
 
   it('should handle approve decision without error', async () => {

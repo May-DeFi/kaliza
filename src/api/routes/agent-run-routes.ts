@@ -19,6 +19,7 @@ const router = Router();
 const createSchema = z.object({
   task_id: z.string().uuid(),
   workspace_id: z.string().uuid(),
+  user_id: z.string().uuid(),
   service_id: z.string(),
   objective: z.string().min(1),
   tool_allowlist: z.array(z.string()).optional(),

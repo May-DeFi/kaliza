@@ -23,10 +23,14 @@ export class TemporalLangGraphOrchestrator implements AgentOrchestrator {
     const threadId = `kaliza-thread-${input.task_id}`;
     const workflowId = `kaliza-task-${input.task_id}`;
 
+    if (!input.user_id) {
+      throw new Error('user_id is required to create a Temporal agent run');
+    }
+
     const agentRunInput = {
       task_id: input.task_id,
       workspace_id: input.workspace_id,
-      user_id: input.user_id ?? input.workspace_id,
+      user_id: input.user_id,
       role: 'OWNER',
       objective: input.objective,
       service_id: input.service_id,

@@ -15,6 +15,18 @@ export async function createApproval(input: {
   expiryHours?: number;
 }): Promise<Approval> {
   const supabase = getSupabaseAdminClient();
+  const { data: task, error: taskErr } = await supabase
+    .from('tasks')
+    .select('workspace_id, user_id, id')
+    .eq('id', input.task_id)
+    .maybeSingle();
+
+  if (taskErr) throw taskErr;
+  if (!task) throw new NotFoundError('Task', input.task_id);
+  if (task.workspace_id !== input.workspace_id) {
+    throw new ForbiddenError('Task does not belong to the supplied workspace');
+  }
+
   const actionHash = computeActionHash(input.payload);
   const expiry = input.expiryHours
     ? new Date(Date.now() + input.expiryHours * 60 * 60 * 1000).toISOString()
@@ -84,6 +96,16 @@ export async function decideApproval(input: {
   workspace_id: string;
   modified_payload?: Record<string, unknown>;
 }): Promise<Approval> {
+  const validDecisions = [
+    ApprovalStatus.APPROVED,
+    ApprovalStatus.REJECTED,
+    ApprovalStatus.CHANGES_REQUESTED,
+  ] as const;
+
+  if (!validDecisions.includes(input.decision as (typeof validDecisions)[number])) {
+    throw new ConflictError(`Invalid approval decision: ${String(input.decision)}`);
+  }
+
   const approval = await getApproval(input.approval_id);
 
   if (approval.workspace_id !== input.workspace_id) {

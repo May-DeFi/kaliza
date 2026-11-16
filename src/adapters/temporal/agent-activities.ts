@@ -18,6 +18,7 @@ export interface AgentRunInput {
   budget_limit_tokens: number;
   agent_run_id: string;
   thread_id: string;
+  approval_id?: string | null;
 }
 
 export interface AgentRunResult {
@@ -26,6 +27,7 @@ export interface AgentRunResult {
   status: string;
   final_result: string;
   tokens_used: number;
+  approval_id?: string | null;
   error?: string;
 }
 

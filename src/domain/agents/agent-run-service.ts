@@ -42,62 +42,94 @@ export async function updateAgentRunStatus(agentRunId: string, status: AgentRunS
   if (error) throw error;
 }
 
+const ACTIVE_RUN_STATUSES: AgentRunStatusValue[] = [
+  AgentRunStatus.CREATED,
+  AgentRunStatus.RUNNING,
+  AgentRunStatus.PAUSED,
+  AgentRunStatus.AWAITING_APPROVAL,
+  AgentRunStatus.AWAITING_INPUT,
+];
+
 export async function createAgentRun(input: CreateRunInput): Promise<{ agentRun: AgentRun; runReference: { run_id: string; task_id: string; status: string } }> {
   ensureOrchestrator();
 
   const supabase = getSupabaseAdminClient();
 
-  const { data: existingRun, error: existingErr } = await supabase
+  const { data: existingRuns, error: existingErr } = await supabase
     .from('agent_runs')
     .select('*')
     .eq('task_id', input.task_id)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .order('created_at', { ascending: false });
 
   if (existingErr) throw existingErr;
-  if (existingRun) {
-    const persisted = existingRun as AgentRun;
+
+  const activeRun = (existingRuns ?? []).find((run) => ACTIVE_RUN_STATUSES.includes(run.status as AgentRunStatusValue));
+
+  if (activeRun) {
     return {
-      agentRun: persisted,
+      agentRun: activeRun as AgentRun,
       runReference: {
-        run_id: persisted.external_run_id ?? persisted.id,
+        run_id: activeRun.external_run_id ?? activeRun.id,
         task_id: input.task_id,
-        status: persisted.status,
+        status: activeRun.status,
       },
     };
   }
 
-  const { data, error } = await supabase
-    .from('agent_runs')
-    .insert({
-      task_id: input.task_id,
-      orchestrator: isTemporalConfigured() ? 'temporal-langgraph' : 'stub',
-      status: AgentRunStatus.CREATED,
-      trace_metadata: {},
-    })
-    .select('*')
-    .single();
+  try {
+    const { data, error } = await supabase
+      .from('agent_runs')
+      .insert({
+        task_id: input.task_id,
+        orchestrator: isTemporalConfigured() ? 'temporal-langgraph' : 'stub',
+        status: AgentRunStatus.CREATED,
+        trace_metadata: {},
+      })
+      .select('*')
+      .single();
 
-  if (error) throw error;
-  const agentRun = data as AgentRun;
+    if (error) throw error;
+    const agentRun = data as AgentRun;
 
-  const orchestrator = getOrchestrator();
-  const runRef = await orchestrator.createRun(input);
+    const orchestrator = getOrchestrator();
+    const runRef = await orchestrator.createRun(input);
 
-  const { error: updateErr } = await supabase
-    .from('agent_runs')
-    .update({
-      external_run_id: runRef.run_id,
-      status: AgentRunStatus.RUNNING,
-      temporal_workflow_id: runRef.run_id,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', agentRun.id);
+    const { error: updateErr } = await supabase
+      .from('agent_runs')
+      .update({
+        external_run_id: runRef.run_id,
+        status: AgentRunStatus.RUNNING,
+        temporal_workflow_id: runRef.run_id,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', agentRun.id);
 
-  if (updateErr) throw updateErr;
+    if (updateErr) throw updateErr;
 
-  return { agentRun: { ...agentRun, external_run_id: runRef.run_id, status: AgentRunStatus.RUNNING }, runReference: runRef };
+    return { agentRun: { ...agentRun, external_run_id: runRef.run_id, status: AgentRunStatus.RUNNING }, runReference: runRef };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.toLowerCase().includes('duplicate') || message.toLowerCase().includes('already')) {
+      const { data: retryRuns, error: retryErr } = await supabase
+        .from('agent_runs')
+        .select('*')
+        .eq('task_id', input.task_id)
+        .order('created_at', { ascending: false });
+      if (retryErr) throw retryErr;
+      const retryRun = (retryRuns ?? []).find((run) => ACTIVE_RUN_STATUSES.includes(run.status as AgentRunStatusValue));
+      if (retryRun) {
+        return {
+          agentRun: retryRun as AgentRun,
+          runReference: {
+            run_id: retryRun.external_run_id ?? retryRun.id,
+            task_id: input.task_id,
+            status: retryRun.status,
+          },
+        };
+      }
+    }
+    throw err;
+  }
 }
 
 export async function getAgentRun(id: string): Promise<AgentRun> {
