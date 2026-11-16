@@ -16,24 +16,34 @@ import { kalizaAgentWorkflow } from '../temporal/agent-workflow.js';
 import { logger } from '../../config/logger.js';
 import { WorkflowIdConflictPolicy } from '@temporalio/common';
 
+export function getTemporalWorkflowId(taskId: string, agentRunRecordId: string): string {
+  return `kaliza-task-${taskId}-${agentRunRecordId}`;
+}
+
 export class TemporalLangGraphOrchestrator implements AgentOrchestrator {
   async createRun(input: CreateRunInput): Promise<RunReference> {
     const client = await getTemporalClient();
     const taskQueue = getTaskQueue();
-    const threadId = `kaliza-thread-${input.task_id}`;
-    const workflowId = `kaliza-task-${input.task_id}`;
+    const threadId = `kaliza-thread-${input.agent_run_record_id ?? input.task_id}`;
+    const workflowId = input.agent_run_record_id
+      ? getTemporalWorkflowId(input.task_id, input.agent_run_record_id)
+      : `kaliza-task-${input.task_id}-legacy`;
+
+    if (!input.user_id) {
+      throw new Error('user_id is required to create a Temporal agent run');
+    }
 
     const agentRunInput = {
       task_id: input.task_id,
       workspace_id: input.workspace_id,
-      user_id: input.user_id ?? input.workspace_id,
+      user_id: input.user_id,
       role: 'OWNER',
       objective: input.objective,
       service_id: input.service_id,
       conversation_context: input.context_references?.join('\n') ?? '',
       tool_allowlist: input.tool_allowlist ?? [],
       budget_limit_tokens: input.budget_limit_tokens ?? 50000,
-      agent_run_id: workflowId,
+      agent_run_id: input.agent_run_record_id ?? workflowId,
       thread_id: threadId,
     };
 
@@ -42,8 +52,8 @@ export class TemporalLangGraphOrchestrator implements AgentOrchestrator {
         workflowId,
         taskQueue,
         args: [agentRunInput],
-        workflowExecutionTimeout: '24 hours',
-        workflowRunTimeout: '2 hours',
+        workflowExecutionTimeout: '72 hours',
+        workflowRunTimeout: '72 hours',
         workflowIdConflictPolicy: WorkflowIdConflictPolicy.FAIL,
       });
 
@@ -81,7 +91,7 @@ export class TemporalLangGraphOrchestrator implements AgentOrchestrator {
   async cancelRun(input: CancelRunInput): Promise<void> {
     const client = await getTemporalClient();
     const handle = client.workflow.getHandle(input.run_id);
-    await handle.cancel();
+    await handle.signal('cancel');
     logger.info('Workflow cancelled', { runId: input.run_id, taskId: input.task_id });
   }
 

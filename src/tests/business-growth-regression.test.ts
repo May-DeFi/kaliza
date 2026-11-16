@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   createTask: vi.fn(),
   transitionTask: vi.fn(),
   createAgentRun: vi.fn(),
+  listTaskAgentRuns: vi.fn(),
   notifyTaskEvent: vi.fn(),
   recordAuditEvent: vi.fn(),
 }));
@@ -17,6 +18,7 @@ vi.mock('../domain/tasks/task-service.js', () => ({
 
 vi.mock('../domain/agents/agent-run-service.js', () => ({
   createAgentRun: mocks.createAgentRun,
+  listTaskAgentRuns: mocks.listTaskAgentRuns,
 }));
 
 vi.mock('../domain/notifications/notification-service.js', () => ({
@@ -82,8 +84,9 @@ import { decideApproval } from '../domain/approvals/approval-service.js';
 describe('Business growth task safeguards', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.createTask.mockResolvedValue({ id: 'task-1', status: 'RECEIVED' });
-    mocks.getTask.mockResolvedValue({ id: 'task-1', workspace_id: 'ws-1', status: 'RECEIVED' });
+    mocks.createTask.mockResolvedValue({ id: 'task-1', status: 'RECEIVED', workspace_id: 'ws-1', user_id: 'user-1' });
+    mocks.getTask.mockResolvedValue({ id: 'task-1', workspace_id: 'ws-1', status: 'RECEIVED', user_id: 'user-1' });
+    mocks.listTaskAgentRuns.mockResolvedValue([]);
     mocks.createAgentRun.mockResolvedValue({ agentRun: { id: 'run-1' }, runReference: { run_id: 'run-1', task_id: 'task-1', status: 'RUNNING' } });
     mocks.transitionTask.mockResolvedValue({ id: 'task-1' });
   });
@@ -106,5 +109,71 @@ describe('Business growth task safeguards', () => {
     await expect(
       decideApproval({ approval_id: 'approval-1', decision: 'APPROVED', approver_id: 'user-2', workspace_id: 'ws-2' }),
     ).rejects.toThrow('workspace');
+  });
+
+  it('rejects a task when the supplied workspace is incorrect', async () => {
+    mocks.getTask.mockResolvedValue({ id: 'task-1', workspace_id: 'ws-2', status: 'RECEIVED', user_id: 'user-1' });
+
+    await expect(
+      startBusinessGrowthTask({
+        workspace_id: 'ws-1',
+        user_id: 'user-1',
+        objective: 'Create a social plan',
+        task_id: 'task-1',
+      }),
+    ).rejects.toThrow('workspace');
+  });
+
+  it('rejects a task when the supplied user is not the owning user', async () => {
+    mocks.getTask.mockResolvedValue({ id: 'task-1', workspace_id: 'ws-1', status: 'RECEIVED', user_id: 'user-2' });
+
+    await expect(
+      startBusinessGrowthTask({
+        workspace_id: 'ws-1',
+        user_id: 'user-1',
+        objective: 'Create a social plan',
+        task_id: 'task-1',
+      }),
+    ).rejects.toThrow('different user');
+  });
+
+  it('reuses an active agent run instead of creating a duplicate run', async () => {
+    mocks.listTaskAgentRuns.mockResolvedValue([{ id: 'run-1', task_id: 'task-1', status: 'RUNNING', external_run_id: 'ext-1' }]);
+
+    const result = await startBusinessGrowthTask({
+      workspace_id: 'ws-1',
+      user_id: 'user-1',
+      objective: 'Create a social plan',
+      task_id: 'task-1',
+    });
+
+    expect(result.agent_run_id).toBe('run-1');
+    expect(mocks.createAgentRun).not.toHaveBeenCalled();
+  });
+
+  it('creates a new agent run when the previous run failed', async () => {
+    mocks.listTaskAgentRuns.mockResolvedValue([{ id: 'run-old', task_id: 'task-1', status: 'FAILED', external_run_id: 'ext-old' }]);
+
+    await startBusinessGrowthTask({
+      workspace_id: 'ws-1',
+      user_id: 'user-1',
+      objective: 'Create a social plan',
+      task_id: 'task-1',
+    });
+
+    expect(mocks.createAgentRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('creates a new agent run when the previous run was cancelled', async () => {
+    mocks.listTaskAgentRuns.mockResolvedValue([{ id: 'run-old', task_id: 'task-1', status: 'CANCELLED', external_run_id: 'ext-old' }]);
+
+    await startBusinessGrowthTask({
+      workspace_id: 'ws-1',
+      user_id: 'user-1',
+      objective: 'Create a social plan',
+      task_id: 'task-1',
+    });
+
+    expect(mocks.createAgentRun).toHaveBeenCalledTimes(1);
   });
 });

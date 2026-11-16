@@ -1,7 +1,7 @@
-import { ServiceId } from '../../config/constants.js';
+import { ServiceId, TaskStatus, type TaskStatusValue } from '../../config/constants.js';
 import type { CreateRunInput } from '../../domain/agents/orchestrator.js';
 import { createTask, transitionTask, getTask } from '../../domain/tasks/task-service.js';
-import { createAgentRun } from '../../domain/agents/agent-run-service.js';
+import { createAgentRun, listTaskAgentRuns } from '../../domain/agents/agent-run-service.js';
 import { callModel } from '../../domain/models/model-gateway.js';
 import { evaluatePolicy } from '../../domain/policies/policy-engine.js';
 import { createApproval } from '../../domain/approvals/approval-service.js';
@@ -9,6 +9,7 @@ import { notifyTaskEvent } from '../../domain/notifications/notification-service
 import { recordUsage } from '../../domain/usage/usage-service.js';
 import { recordAuditEvent } from '../../domain/audit/audit-service.js';
 import { logger } from '../../config/logger.js';
+import { ForbiddenError } from '../../api/middleware/errors.js';
 
 export const SERVICE_ID = ServiceId.BUSINESS_GROWTH;
 
@@ -98,18 +99,45 @@ export async function startBusinessGrowthTask(input: BusinessGrowthTaskInput): P
         idempotency_key: input.idempotency_key,
       });
 
-  await transitionTask(task.id, 'CLASSIFIED', 'system', `Classified as Business Growth task`);
+  if (task.workspace_id !== input.workspace_id) {
+    throw new ForbiddenError('Task does not belong to the supplied workspace');
+  }
+
+  if (task.user_id && task.user_id !== input.user_id) {
+    throw new ForbiddenError('Task is owned by a different user');
+  }
+
+  const existingRuns = await listTaskAgentRuns(task.id);
+  const activeRun = existingRuns.find((run) => [
+    'CREATED',
+    'RUNNING',
+    'PAUSED',
+    'AWAITING_APPROVAL',
+    'AWAITING_INPUT',
+  ].includes(run.status));
+
+  if (activeRun) {
+    return { task_id: task.id, agent_run_id: activeRun.id, status: activeRun.status };
+  }
+
+  const taskStatus = task.status as TaskStatusValue;
+  if (taskStatus === TaskStatus.RECEIVED) {
+    await transitionTask(task.id, TaskStatus.CLASSIFIED, 'system', `Classified as Business Growth task`);
+  }
+
+  if (taskStatus === TaskStatus.CLASSIFIED || taskStatus === TaskStatus.RECEIVED) {
+    await transitionTask(task.id, TaskStatus.PLANNED, 'system', 'Task planned, agent run started');
+  }
 
   const { agentRun } = await createAgentRun({
     task_id: task.id,
     workspace_id: input.workspace_id,
+    user_id: input.user_id,
     service_id: SERVICE_ID,
     objective: input.objective,
     tool_allowlist: ['research_web', 'generate_content', 'send_whatsapp', 'publish_meta', 'manage_ads'],
     budget_limit_tokens: 50000,
   });
-
-  await transitionTask(task.id, 'PLANNED', 'system', 'Task planned, agent run started');
 
   await notifyTaskEvent({
     workspace_id: input.workspace_id,
@@ -180,6 +208,14 @@ export async function requestApprovalForAction(input: {
   action: string;
   payload: Record<string, unknown>;
 }): Promise<string> {
+  const task = await getTask(input.task_id);
+  if (task.workspace_id !== input.workspace_id) {
+    throw new ForbiddenError('Task does not belong to the supplied workspace');
+  }
+  if (task.user_id && task.user_id !== input.user_id) {
+    throw new ForbiddenError('Task is owned by a different user');
+  }
+
   const policyResult = evaluatePolicy({
     workspace_id: input.workspace_id,
     user_id: input.user_id,

@@ -37,6 +37,18 @@ const AgentState = Annotation.Root({
 });
 
 export type KalizaAgentState = typeof AgentState.State;
+export class AgentRunCancelledError extends Error {
+  constructor() {
+    super('Agent run cancelled');
+    this.name = 'AgentRunCancelledError';
+  }
+}
+
+type ExecutionCheckpoint = () => Promise<void>;
+
+async function checkExecution(checkpoint?: ExecutionCheckpoint): Promise<void> {
+  await checkpoint?.();
+}
 
 async function callAgentModel(
   state: KalizaAgentState,
@@ -58,7 +70,8 @@ async function callAgentModel(
 }
 
 // ===== Supervisor =====
-async function supervisorNode(state: KalizaAgentState): Promise<Partial<KalizaAgentState>> {
+async function supervisorNode(state: KalizaAgentState, checkpoint?: ExecutionCheckpoint): Promise<Partial<KalizaAgentState>> {
+  await checkExecution(checkpoint);
   logger.info('Supervisor evaluating task', { taskId: state.task_id, phase: state.current_phase });
 
   if (state.current_phase === 'supervisor') {
@@ -84,7 +97,8 @@ Respond with a structured plan.`,
 }
 
 // ===== Planning =====
-async function planningNode(state: KalizaAgentState): Promise<Partial<KalizaAgentState>> {
+async function planningNode(state: KalizaAgentState, checkpoint?: ExecutionCheckpoint): Promise<Partial<KalizaAgentState>> {
+  await checkExecution(checkpoint);
   logger.info('Planning agent working', { taskId: state.task_id });
   const planText = await callAgentModel(
     state,
@@ -96,7 +110,8 @@ async function planningNode(state: KalizaAgentState): Promise<Partial<KalizaAgen
 }
 
 // ===== Research =====
-async function researchNode(state: KalizaAgentState): Promise<Partial<KalizaAgentState>> {
+async function researchNode(state: KalizaAgentState, checkpoint?: ExecutionCheckpoint): Promise<Partial<KalizaAgentState>> {
+  await checkExecution(checkpoint);
   logger.info('Research agent working', { taskId: state.task_id });
   const findings = await callAgentModel(
     state,
@@ -108,7 +123,8 @@ async function researchNode(state: KalizaAgentState): Promise<Partial<KalizaAgen
 }
 
 // ===== Strategy =====
-async function strategyNode(state: KalizaAgentState): Promise<Partial<KalizaAgentState>> {
+async function strategyNode(state: KalizaAgentState, checkpoint?: ExecutionCheckpoint): Promise<Partial<KalizaAgentState>> {
+  await checkExecution(checkpoint);
   logger.info('Strategy agent working', { taskId: state.task_id });
   const strategyText = await callAgentModel(
     state,
@@ -120,13 +136,15 @@ async function strategyNode(state: KalizaAgentState): Promise<Partial<KalizaAgen
 }
 
 // ===== Execution =====
-async function executionNode(state: KalizaAgentState): Promise<Partial<KalizaAgentState>> {
+async function executionNode(state: KalizaAgentState, checkpoint?: ExecutionCheckpoint): Promise<Partial<KalizaAgentState>> {
+  await checkExecution(checkpoint);
   logger.info('Execution agent working', { taskId: state.task_id });
   const results: string[] = [];
   let sandboxId = state.sandbox_id;
 
   if (!sandboxId) {
     try {
+      await checkExecution(checkpoint);
       const sandbox = await provisionSandbox({ workspace_id: state.workspace_id, task_id: state.task_id });
       sandboxId = sandbox.id;
     } catch (err) {
@@ -136,15 +154,19 @@ async function executionNode(state: KalizaAgentState): Promise<Partial<KalizaAge
 
   if (sandboxId) {
     try {
+      await checkExecution(checkpoint);
       const creds = await getWorkspaceScopedCredentials(state.workspace_id, state.task_id);
       for (const [key, value] of Object.entries(creds)) {
+        await checkExecution(checkpoint);
         await setSandboxEnvVar({ sandbox_id: sandboxId, key, value });
       }
 
+      await checkExecution(checkpoint);
       const result = await executeInSandbox({ sandbox_id: sandboxId, command: 'echo "Kaliza agent environment ready" && uname -a' });
       results.push(`Sandbox: exit=${result.exit_code}, stdout=${result.stdout}`);
 
       if (state.service_id === 'business-growth') {
+        await checkExecution(checkpoint);
         const scriptResult = await runAgentScript({
           sandbox_id: sandboxId,
           language: 'python',
@@ -154,10 +176,12 @@ async function executionNode(state: KalizaAgentState): Promise<Partial<KalizaAge
         results.push(`Business analysis script: exit=${scriptResult.exit_code}, output=${scriptResult.stdout}`);
       }
     } catch (err) {
+      if (err instanceof AgentRunCancelledError) throw err;
       results.push(`Sandbox error: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
+  await checkExecution(checkpoint);
   const execResult = await callAgentModel(
     state,
     `You are the Kaliza Execution agent. Carry out approved actions through the tool gateway. Report if approval is needed for high-risk actions like publishing, spending, or sending external messages.`,
@@ -170,7 +194,8 @@ async function executionNode(state: KalizaAgentState): Promise<Partial<KalizaAge
 }
 
 // ===== Content =====
-async function contentNode(state: KalizaAgentState): Promise<Partial<KalizaAgentState>> {
+async function contentNode(state: KalizaAgentState, checkpoint?: ExecutionCheckpoint): Promise<Partial<KalizaAgentState>> {
+  await checkExecution(checkpoint);
   logger.info('Content agent working', { taskId: state.task_id });
   const deliverable = await callAgentModel(
     state,
@@ -182,7 +207,8 @@ async function contentNode(state: KalizaAgentState): Promise<Partial<KalizaAgent
 }
 
 // ===== Review =====
-async function reviewNode(state: KalizaAgentState): Promise<Partial<KalizaAgentState>> {
+async function reviewNode(state: KalizaAgentState, checkpoint?: ExecutionCheckpoint): Promise<Partial<KalizaAgentState>> {
+  await checkExecution(checkpoint);
   logger.info('Review agent working', { taskId: state.task_id });
   const reviewText = await callAgentModel(
     state,
@@ -202,15 +228,15 @@ function routeAfterSupervisor(state: KalizaAgentState): string {
 }
 
 // ===== Build =====
-export function buildAgentGraph() {
+function buildGraph(checkpoint?: ExecutionCheckpoint) {
   const graph = new StateGraph(AgentState)
-    .addNode('supervisor', supervisorNode)
-    .addNode('planning_agent', planningNode)
-    .addNode('research_agent', researchNode)
-    .addNode('strategy_agent', strategyNode)
-    .addNode('execution_agent', executionNode)
-    .addNode('content_agent', contentNode)
-    .addNode('review_agent', reviewNode)
+    .addNode('supervisor', (state) => supervisorNode(state, checkpoint))
+    .addNode('planning_agent', (state) => planningNode(state, checkpoint))
+    .addNode('research_agent', (state) => researchNode(state, checkpoint))
+    .addNode('strategy_agent', (state) => strategyNode(state, checkpoint))
+    .addNode('execution_agent', (state) => executionNode(state, checkpoint))
+    .addNode('content_agent', (state) => contentNode(state, checkpoint))
+    .addNode('review_agent', (state) => reviewNode(state, checkpoint))
     .addEdge(START, 'supervisor')
     .addConditionalEdges('supervisor', routeAfterSupervisor)
     .addEdge('planning_agent', 'research_agent')
@@ -219,26 +245,14 @@ export function buildAgentGraph() {
     .addEdge('execution_agent', 'content_agent')
     .addEdge('content_agent', 'review_agent')
     .addEdge('review_agent', 'supervisor');
-  return graph.compile();
+  return graph;
 }
 
-export function buildAgentGraphWithCheckpoint(workspaceId: string) {
+export function buildAgentGraph() {
+  return buildGraph().compile();
+}
+
+export function buildAgentGraphWithCheckpoint(workspaceId: string, checkpoint?: ExecutionCheckpoint) {
   const checkpointer = new SupabaseCheckpointSaver(workspaceId);
-  const graph = new StateGraph(AgentState)
-    .addNode('supervisor', supervisorNode)
-    .addNode('planning_agent', planningNode)
-    .addNode('research_agent', researchNode)
-    .addNode('strategy_agent', strategyNode)
-    .addNode('execution_agent', executionNode)
-    .addNode('content_agent', contentNode)
-    .addNode('review_agent', reviewNode)
-    .addEdge(START, 'supervisor')
-    .addConditionalEdges('supervisor', routeAfterSupervisor)
-    .addEdge('planning_agent', 'research_agent')
-    .addEdge('research_agent', 'strategy_agent')
-    .addEdge('strategy_agent', 'execution_agent')
-    .addEdge('execution_agent', 'content_agent')
-    .addEdge('content_agent', 'review_agent')
-    .addEdge('review_agent', 'supervisor');
-  return graph.compile({ checkpointer });
+  return buildGraph(checkpoint).compile({ checkpointer });
 }

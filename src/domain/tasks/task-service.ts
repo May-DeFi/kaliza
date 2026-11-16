@@ -1,10 +1,12 @@
 import { getSupabaseAdminClient } from '../../adapters/database/supabase.js';
 import type { Task, TaskStep, TaskTransition } from '../../contracts/types.js';
-import { NotFoundError, ConflictError } from '../../api/middleware/errors.js';
-import { TaskStatus, type TaskStatusValue } from '../../config/constants.js';
+import { NotFoundError, ConflictError, ForbiddenError } from '../../api/middleware/errors.js';
+import { AgentRunStatus, MembershipRole, TaskStatus, type AgentRunStatusValue, type TaskStatusValue } from '../../config/constants.js';
 import { assertCanTransition } from './task-state-machine.js';
 import { recordAuditEvent } from '../audit/audit-service.js';
 import { generateCorrelationId, generateIdempotencyKey } from '../../adapters/encryption/crypto.js';
+import { cancelAgentRun, listTaskAgentRuns } from '../agents/agent-run-service.js';
+import { getMembership } from '../tenancy/workspace-service.js';
 
 export async function createTask(input: {
   workspace_id: string;
@@ -147,6 +149,27 @@ export async function transitionTask(
 }
 
 export async function cancelTask(taskId: string, actor: string, reason?: string): Promise<Task> {
+  const task = await getTask(taskId);
+  const currentStatus = task.status as TaskStatusValue;
+  if (currentStatus !== TaskStatus.CANCELLED) assertCanTransition(currentStatus, TaskStatus.CANCELLED);
+  const membership = await getMembership(task.workspace_id, actor);
+  if (!membership || (task.user_id !== actor && membership.role !== MembershipRole.OWNER && membership.role !== MembershipRole.ADMIN)) {
+    throw new ForbiddenError('User is not authorized to cancel this task');
+  }
+
+  const activeStatuses: AgentRunStatusValue[] = [
+    AgentRunStatus.CREATED,
+    AgentRunStatus.RUNNING,
+    AgentRunStatus.PAUSED,
+    AgentRunStatus.AWAITING_APPROVAL,
+    AgentRunStatus.AWAITING_INPUT,
+  ];
+  const runs = await listTaskAgentRuns(taskId);
+  for (const run of runs) {
+    if (activeStatuses.includes(run.status)) await cancelAgentRun(run.id);
+  }
+
+  if (currentStatus === TaskStatus.CANCELLED) return task;
   return transitionTask(taskId, TaskStatus.CANCELLED, actor, reason ?? 'Cancelled by user');
 }
 
